@@ -142,13 +142,30 @@ String getPortalHTML() {
         <div class="card">
             <h2>Anzeige</h2>
             <label for="dep-count">Anzahl Abfahrten</label>
-            <select id="dep-count" onchange="saveDepCount(this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
+            <select id="dep-count" onchange="saveSetting('dep_count', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
                 <option value="3">3</option>
                 <option value="6">6</option>
                 <option value="9">9</option>
                 <option value="12">12</option>
                 <option value="15">15</option>
             </select>
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;">
+                <input type="checkbox" id="scroll-enabled" onchange="saveSetting('scroll_enabled', this.checked ? '1' : '0')" style="width:18px;height:18px;accent-color:#ffcc00;">
+                <span style="font-size:0.9rem;">Scrollen aktiviert</span>
+            </label>
+            <label for="scroll-speed">Scroll-Geschwindigkeit</label>
+            <select id="scroll-speed" onchange="saveSetting('scroll_speed', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
+                <option value="1500">1.5s (Schnell)</option>
+                <option value="2000">2s</option>
+                <option value="3000">3s (Standard)</option>
+                <option value="4000">4s</option>
+                <option value="5000">5s</option>
+                <option value="8000">8s (Langsam)</option>
+            </select>
+            <p style="font-size:0.75rem;color:#888;margin-top:4px;">Wenn Scrollen deaktiviert ist, werden nur die naechsten 3 Abfahrten angezeigt.</p>
+            <label for="walk-time" style="margin-top:12px;">Fussweg zur Haltestelle (Minuten)</label>
+            <input type="number" id="walk-time" min="0" max="30" value="0" onchange="saveSetting('walk_time', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
+            <p style="font-size:0.75rem;color:#888;">Nur Abfahrten anzeigen die noch erreichbar sind.</p>
             <div id="display-msg"></div>
         </div>
 
@@ -297,16 +314,20 @@ String getPortalHTML() {
     }
 
     async function saveDepCount(val) {
+        await saveSetting('dep_count', val);
+    }
+
+    async function saveSetting(key, val) {
         const msgEl = document.getElementById('display-msg');
         try {
             const res = await fetch('/api/settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: 'dep_count=' + encodeURIComponent(val)
+                body: key + '=' + encodeURIComponent(val)
             });
             const data = await res.json();
             if (data.ok) {
-                msgEl.innerHTML = '<div class="msg msg-ok">Gespeichert</div>';
+                msgEl.innerHTML = '<div class="msg msg-success">Gespeichert</div>';
             } else {
                 msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
             }
@@ -316,19 +337,24 @@ String getPortalHTML() {
         }
     }
 
-    async function loadDepCount() {
+    async function loadSettings() {
         try {
             const res = await fetch('/api/settings');
             const data = await res.json();
             if (data.dep_count) {
                 document.getElementById('dep-count').value = data.dep_count;
             }
+            document.getElementById('scroll-enabled').checked = !!data.scroll_enabled;
+            if (data.scroll_speed) {
+                document.getElementById('scroll-speed').value = data.scroll_speed;
+            }
+            document.getElementById('walk-time').value = data.walk_time || 0;
         } catch(e) {}
     }
 
     // Init
     loadStatus();
-    loadDepCount();
+    loadSettings();
     </script>
 </body>
 </html>

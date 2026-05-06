@@ -15,6 +15,9 @@
         theme: 'dark',
         viewMode: 'single',     // 'single' or 'split'
         kioskMode: false,
+        ledScrollEnabled: true, // Scroll through departures in LED mode
+        ledScrollSpeed: 3000,   // ms between scroll steps
+        walkTime: 0,            // Minutes to walk to station
         filters: {
             suburban: true,
             subway: true,
@@ -62,6 +65,9 @@
         viewLed: document.getElementById('view-led'),
         ledView: document.getElementById('led-view'),
         ledCanvas: document.getElementById('led-canvas'),
+        ledScrollToggle: document.getElementById('led-scroll-toggle'),
+        ledScrollSpeed: document.getElementById('led-scroll-speed'),
+        walkTime: document.getElementById('walk-time'),
         // Kiosk
         kioskBtn: document.getElementById('kiosk-btn'),
         kioskToggle: document.getElementById('kiosk-toggle'),
@@ -108,6 +114,9 @@
                 state.theme = parsed.theme || 'dark';
                 state.viewMode = parsed.viewMode || 'single';
                 state.kioskMode = parsed.kioskMode || false;
+                state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
+                state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
+                state.walkTime = parsed.walkTime || 0;
                 state.filters = { ...state.filters, ...parsed.filters };
             }
         } catch (e) {
@@ -125,6 +134,9 @@
                 theme: state.theme,
                 viewMode: state.viewMode,
                 kioskMode: state.kioskMode,
+                ledScrollEnabled: state.ledScrollEnabled,
+                ledScrollSpeed: state.ledScrollSpeed,
+                walkTime: state.walkTime,
                 filters: state.filters
             }));
         } catch (e) {
@@ -198,10 +210,31 @@
             startRefreshTimer();
         });
 
+        // Walk time
+        dom.walkTime.addEventListener('change', (e) => {
+            const val = Math.max(0, Math.min(30, parseInt(e.target.value) || 0));
+            state.walkTime = val;
+            e.target.value = val;
+            saveState();
+            if (state.activeStationId) showDepartures();
+        });
+
         // View mode
         dom.viewSingle.addEventListener('click', () => applyViewMode('single'));
         dom.viewSplit.addEventListener('click', () => applyViewMode('split'));
         dom.viewLed.addEventListener('click', () => applyViewMode('led'));
+
+        // LED scroll settings
+        dom.ledScrollToggle.addEventListener('change', (e) => {
+            state.ledScrollEnabled = e.target.checked;
+            saveState();
+            if (state.viewMode === 'led') fetchLedDepartures();
+        });
+        dom.ledScrollSpeed.addEventListener('change', (e) => {
+            state.ledScrollSpeed = parseInt(e.target.value) || 3000;
+            saveState();
+            if (state.viewMode === 'led') fetchLedDepartures();
+        });
 
         // Kiosk mode
         dom.kioskBtn.addEventListener('click', () => toggleKioskMode());
@@ -438,7 +471,8 @@
 
             if (data.departures && data.departures.length > 0) {
                 state.departures = data.departures;
-                renderDepartures(data.departures);
+                const filtered = filterByWalkTime(data.departures);
+                renderDepartures(filtered);
                 renderAlerts(data.departures);
             } else {
                 dom.departuresList.innerHTML = `
@@ -471,6 +505,17 @@
                 </div>
             `;
         }
+    }
+
+    function filterByWalkTime(departures) {
+        if (!state.walkTime || state.walkTime <= 0) return departures;
+        const now = new Date();
+        return departures.filter(dep => {
+            const when = dep.when ? new Date(dep.when) : (dep.plannedWhen ? new Date(dep.plannedWhen) : null);
+            if (!when) return true;
+            const diffMin = (when - now) / 60000;
+            return diffMin >= state.walkTime;
+        });
     }
 
     function renderDepartures(departures) {
@@ -598,6 +643,9 @@
         dom.departureCountSelect.value = state.departureCount;
         dom.refreshIntervalInput.value = state.refreshInterval;
         dom.kioskToggle.checked = state.kioskMode;
+        dom.ledScrollToggle.checked = state.ledScrollEnabled;
+        dom.ledScrollSpeed.value = state.ledScrollSpeed;
+        dom.walkTime.value = state.walkTime;
         dom.viewSingle.classList.toggle('active', state.viewMode === 'single');
         dom.viewSplit.classList.toggle('active', state.viewMode === 'split');
         dom.viewLed.classList.toggle('active', state.viewMode === 'led');
@@ -660,24 +708,45 @@
     }
 
     async function fetchLedDepartures() {
-        if (!state.activeStationId && state.stations.length > 0) {
-            state.activeStationId = state.stations[0].id;
-        }
-        if (!state.activeStationId) {
+        if (state.stations.length === 0) {
             LedRenderer.clear();
             return;
         }
 
         try {
-            const data = await BvgApi.getDepartures(state.activeStationId, state.filters, 30, state.departureCount);
-            if (data.departures && data.departures.length > 0) {
-                LedRenderer.startScroll(data.departures, 3000);
+            // Fetch from all stations and merge
+            const fetches = state.stations.map(s =>
+                BvgApi.getDepartures(s.id, state.filters, 30, state.departureCount)
+                    .then(data => data.departures || [])
+                    .catch(() => [])
+            );
+            const results = await Promise.all(fetches);
+            const allDepartures = results.flat();
+
+            // Sort by departure time (soonest first)
+            const now = new Date();
+            allDepartures.sort((a, b) => {
+                const timeA = new Date(a.when || a.plannedWhen || 0);
+                const timeB = new Date(b.when || b.plannedWhen || 0);
+                return timeA - timeB;
+            });
+
+            // Filter by walk time
+            const reachable = filterByWalkTime(allDepartures);
+
+            if (reachable.length > 0) {
+                if (state.ledScrollEnabled) {
+                    LedRenderer.startScroll(reachable, state.ledScrollSpeed);
+                } else {
+                    LedRenderer.stopScroll();
+                    LedRenderer.render(reachable.slice(0, 3));
+                }
             } else {
                 LedRenderer.render([]);
             }
 
-            const now = new Date();
-            dom.lastUpdate.textContent = `Letzte Aktualisierung: ${now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
+            const updateTime = new Date();
+            dom.lastUpdate.textContent = `Letzte Aktualisierung: ${updateTime.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
         } catch (e) {
             console.error('LED fetch failed:', e);
             LedRenderer.clear();

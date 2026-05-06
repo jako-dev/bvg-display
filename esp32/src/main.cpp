@@ -51,6 +51,9 @@ int activeStationIdx = 0;
 Departure departures[BVG_MAX_DEPARTURES];
 int departureCount = 0;
 int depCountSetting = 6;
+bool scrollEnabled = false;       // Scroll disabled by default: show first 3
+int scrollSpeedSetting = 3000;    // ms between scroll steps
+int walkTimeSetting = 0;          // Minutes walk time to station
 
 String wifiSSID = "";
 String wifiPassword = "";
@@ -64,6 +67,9 @@ void setupAP();
 void setupWebServer();
 void connectWiFi();
 void fetchDepartures();
+void parseDeparturesAppend(const String& json);
+void sortDepartures();
+void filterByWalkTime();
 void renderDisplay();
 void renderSetupScreen();
 void loadSettings();
@@ -324,23 +330,49 @@ void setupWebServer() {
 
     // Settings GET
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* request) {
-        String json = "{\"dep_count\":" + String(depCountSetting) + "}";
-        request->send(200, "application/json", json);
+        JsonDocument doc;
+        doc["dep_count"] = depCountSetting;
+        doc["scroll_enabled"] = scrollEnabled;
+        doc["scroll_speed"] = scrollSpeedSetting;
+        doc["walk_time"] = walkTimeSetting;
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
     });
 
     // Settings POST
     server.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest* request) {
+        bool changed = false;
         if (request->hasParam("dep_count", true)) {
             int val = request->getParam("dep_count", true)->value().toInt();
             if (val >= 1 && val <= 15) {
                 depCountSetting = val;
-                saveSettings();
-                request->send(200, "application/json", "{\"ok\":true}");
-            } else {
-                request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid value\"}");
+                changed = true;
             }
+        }
+        if (request->hasParam("scroll_enabled", true)) {
+            scrollEnabled = request->getParam("scroll_enabled", true)->value() == "1";
+            changed = true;
+        }
+        if (request->hasParam("scroll_speed", true)) {
+            int val = request->getParam("scroll_speed", true)->value().toInt();
+            if (val >= 1000 && val <= 10000) {
+                scrollSpeedSetting = val;
+                changed = true;
+            }
+        }
+        if (request->hasParam("walk_time", true)) {
+            int val = request->getParam("walk_time", true)->value().toInt();
+            if (val >= 0 && val <= 30) {
+                walkTimeSetting = val;
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveSettings();
+            request->send(200, "application/json", "{\"ok\":true}");
         } else {
-            request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing dep_count\"}");
+            request->send(400, "application/json", "{\"ok\":false,\"msg\":\"No valid params\"}");
         }
     });
 
@@ -357,33 +389,38 @@ void setupWebServer() {
 void fetchDepartures() {
     if (WiFi.status() != WL_CONNECTED || stationCount == 0) return;
     
-    String stationId = stations[activeStationIdx].id;
-    String url = "https://" + String(BVG_API_HOST) + "/stops/" + stationId + 
-                 "/departures?duration=" + String(BVG_DEPARTURE_DURATION) + 
-                 "&results=" + String(depCountSetting) + "&pretty=false&language=de";
+    // Fetch from all configured stations and merge
+    departureCount = 0;
 
-    HTTPClient http;
-    http.begin(url);
-    http.setTimeout(10000);
-    int httpCode = http.GET();
+    for (int s = 0; s < stationCount; s++) {
+        String url = "https://" + String(BVG_API_HOST) + "/stops/" + stations[s].id + 
+                     "/departures?duration=" + String(BVG_DEPARTURE_DURATION) + 
+                     "&results=" + String(depCountSetting) + "&pretty=false&language=de";
 
-    if (httpCode == 200) {
-        String payload = http.getString();
-        parseDepartures(payload);
-        scrollOffset = 0;
-        Serial.println("Fetched " + String(departureCount) + " departures");
-    } else {
-        Serial.println("API error: " + String(httpCode));
+        HTTPClient http;
+        http.begin(url);
+        http.setTimeout(10000);
+        int httpCode = http.GET();
+
+        if (httpCode == 200) {
+            String payload = http.getString();
+            parseDeparturesAppend(payload);
+            Serial.println("Station " + stations[s].name + ": OK");
+        } else {
+            Serial.println("API error for " + stations[s].name + ": " + String(httpCode));
+        }
+        http.end();
     }
-    http.end();
 
-    // Cycle through stations on each fetch
-    if (stationCount > 1) {
-        activeStationIdx = (activeStationIdx + 1) % stationCount;
-    }
+    // Sort merged departures by minutesUntil
+    sortDepartures();
+    // Filter by walk time
+    filterByWalkTime();
+    scrollOffset = 0;
+    Serial.println("Total merged departures: " + String(departureCount));
 }
 
-void parseDepartures(const String& json) {
+void parseDeparturesAppend(const String& json) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
@@ -392,7 +429,6 @@ void parseDepartures(const String& json) {
     }
 
     JsonArray deps = doc["departures"].as<JsonArray>();
-    departureCount = 0;
 
     for (JsonObject dep : deps) {
         if (departureCount >= BVG_MAX_DEPARTURES) break;
@@ -436,6 +472,36 @@ void parseDepartures(const String& json) {
     }
 }
 
+// Filter departures by walk time (remove unreachable ones)
+void filterByWalkTime() {
+    if (walkTimeSetting <= 0) return;
+    int writeIdx = 0;
+    for (int i = 0; i < departureCount; i++) {
+        if (departures[i].minutesUntil >= walkTimeSetting) {
+            if (writeIdx != i) departures[writeIdx] = departures[i];
+            writeIdx++;
+        }
+    }
+    departureCount = writeIdx;
+}
+
+// Sort departures by minutesUntil (ascending)
+void sortDepartures() {
+    for (int i = 0; i < departureCount - 1; i++) {
+        for (int j = i + 1; j < departureCount; j++) {
+            if (departures[j].minutesUntil < departures[i].minutesUntil) {
+                Departure tmp = departures[i];
+                departures[i] = departures[j];
+                departures[j] = tmp;
+            }
+        }
+    }
+    // Trim to max
+    if (departureCount > BVG_MAX_DEPARTURES) {
+        departureCount = BVG_MAX_DEPARTURES;
+    }
+}
+
 // ===== Display Rendering =====
 void renderDisplay() {
     matrix->clearScreen();
@@ -447,17 +513,27 @@ void renderDisplay() {
 
     // Render up to DISPLAY_ROWS departures
     int rowHeight = 10;
-    for (int i = 0; i < DISPLAY_ROWS && i < departureCount; i++) {
-        int depIdx = (scrollOffset + i) % departureCount;
-        renderDepartureRow(departures[depIdx], i * rowHeight + 1);
-    }
 
-    // Advance scroll every N frames if more departures than rows
-    static int frameCount = 0;
-    frameCount++;
-    if (frameCount >= 60 && departureCount > DISPLAY_ROWS) { // ~3 seconds at 50ms
-        scrollOffset = (scrollOffset + 1) % departureCount;
-        frameCount = 0;
+    if (!scrollEnabled) {
+        // Static mode: show first 3 departures only
+        for (int i = 0; i < DISPLAY_ROWS && i < departureCount; i++) {
+            renderDepartureRow(departures[i], i * rowHeight + 1);
+        }
+    } else {
+        // Scroll mode
+        for (int i = 0; i < DISPLAY_ROWS && i < departureCount; i++) {
+            int depIdx = (scrollOffset + i) % departureCount;
+            renderDepartureRow(departures[depIdx], i * rowHeight + 1);
+        }
+
+        // Advance scroll based on scrollSpeedSetting
+        static int frameCount = 0;
+        frameCount++;
+        int framesPerScroll = scrollSpeedSetting / SCROLL_SPEED;
+        if (frameCount >= framesPerScroll && departureCount > DISPLAY_ROWS) {
+            scrollOffset = (scrollOffset + 1) % departureCount;
+            frameCount = 0;
+        }
     }
 }
 
@@ -583,6 +659,9 @@ void loadSettings() {
     stationCount = prefs.getInt("stCount", 0);
     
     depCountSetting = prefs.getInt("depCount", 6);
+    scrollEnabled = prefs.getBool("scrollOn", false);
+    scrollSpeedSetting = prefs.getInt("scrollSpd", 3000);
+    walkTimeSetting = prefs.getInt("walkTime", 0);
     
     for (int i = 0; i < stationCount && i < MAX_STATIONS; i++) {
         stations[i].id = prefs.getString(("st_id_" + String(i)).c_str(), "");
@@ -599,6 +678,9 @@ void saveSettings() {
     prefs.putString("pass", wifiPassword);
     prefs.putInt("stCount", stationCount);
     prefs.putInt("depCount", depCountSetting);
+    prefs.putBool("scrollOn", scrollEnabled);
+    prefs.putInt("scrollSpd", scrollSpeedSetting);
+    prefs.putInt("walkTime", walkTimeSetting);
     
     for (int i = 0; i < stationCount; i++) {
         prefs.putString(("st_id_" + String(i)).c_str(), stations[i].id);

@@ -33,7 +33,7 @@
 #define BVG_API_HOST "v6.bvg.transport.rest"
 #define BVG_API_PORT 443
 #define BVG_DEPARTURE_DURATION 30  // minutes to look ahead
-#define BVG_MAX_DEPARTURES 10
+#define BVG_MAX_DEPARTURES 30
 #define BVG_REFRESH_INTERVAL 30000  // ms between API calls
 
 // ===== Display Settings =====
