@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BVG Abfahrtsmonitor</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Settings Panel -->
+        <div id="settings-panel" class="settings-panel">
+            <div class="settings-header">
+                <h2>Einstellungen</h2>
+                <button id="close-settings" class="btn-icon" aria-label="Close settings">&times;</button>
+            </div>
+            <div class="settings-content">
+                <!-- Station Search -->
+                <div class="setting-group">
+                    <label for="station-search">Station hinzufügen</label>
+                    <div class="search-wrapper">
+                        <input type="text" id="station-search" placeholder="z.B. Alexanderplatz, Kottbusser Tor..." autocomplete="off">
+                        <div id="search-results" class="search-results hidden"></div>
+                    </div>
+                </div>
+
+                <!-- Saved Stations -->
+                <div class="setting-group">
+                    <label>Gespeicherte Stationen</label>
+                    <div id="saved-stations" class="saved-stations"></div>
+                </div>
+
+                <!-- Transport Filters -->
+                <div class="setting-group">
+                    <label>Verkehrsmittel</label>
+                    <div class="filter-toggles">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-suburban" checked>
+                            <span class="badge badge-suburban">S</span> S-Bahn
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-subway" checked>
+                            <span class="badge badge-subway">U</span> U-Bahn
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-tram" checked>
+                            <span class="badge badge-tram">T</span> Tram
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-bus" checked>
+                            <span class="badge badge-bus">B</span> Bus
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-ferry" checked>
+                            <span class="badge badge-ferry">F</span> Fähre
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-express" checked>
+                            <span class="badge badge-express">IC</span> IC/ICE
+                        </label>
+                        <label class="toggle-label">
+                            <input type="checkbox" id="filter-regional" checked>
+                            <span class="badge badge-regional">RE</span> Regional
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Theme Toggle -->
+                <div class="setting-group">
+                    <label>Darstellung</label>
+                    <div class="theme-switch">
+                        <button id="theme-dark" class="btn-theme active">Klassisch Dunkel</button>
+                        <button id="theme-modern" class="btn-theme">Modern Minimal</button>
+                    </div>
+                </div>
+
+                <!-- Display Mode -->
+                <div class="setting-group">
+                    <label>Ansicht</label>
+                    <div class="view-mode-switch">
+                        <button id="view-single" class="btn-theme active">Einzelstation</button>
+                        <button id="view-split" class="btn-theme">Split-View</button>
+                        <button id="view-led" class="btn-theme">LED-Panel</button>
+                    </div>
+                    <p class="setting-hint" id="split-hint">Split-View zeigt zwei Stationen nebeneinander (mind. 2 Stationen nötig).</p>
+                    <p class="setting-hint" id="led-hint">LED-Panel emuliert eine 128&times;32 HUB75/P10 LED-Matrix.</p>
+                </div>
+
+                <!-- Kiosk Mode -->
+                <div class="setting-group">
+                    <label>Kiosk-Modus</label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="kiosk-toggle">
+                        <span>Vollbild ohne Bedienelemente</span>
+                    </label>
+                    <p class="setting-hint">Doppelklick oder Escape zum Beenden des Kiosk-Modus.</p>
+                </div>
+
+                <!-- Number of Departures -->
+                <div class="setting-group">
+                    <label for="departure-count">Anzahl Abfahrten</label>
+                    <select id="departure-count">
+                        <option value="1">1</option>
+                        <option value="3">3</option>
+                        <option value="6" selected>6</option>
+                        <option value="9">9</option>
+                        <option value="12">12</option>
+                        <option value="15">15</option>
+                    </select>
+                </div>
+
+                <!-- Refresh Interval -->
+                <div class="setting-group">
+                    <label for="refresh-interval">Aktualisierung (Sekunden)</label>
+                    <input type="number" id="refresh-interval" min="10" max="120" value="30">
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Display -->
+        <div id="display" class="display">
+            <!-- Header -->
+            <div class="display-header" id="display-header">
+                <div class="header-left">
+                    <h1 class="station-name" id="current-station-name">BVG Abfahrtsmonitor</h1>
+                    <span class="realtime-indicator" id="realtime-indicator" title="Echtzeitdaten">&#9679;</span>
+                </div>
+                <div class="header-right">
+                    <span id="clock" class="clock"></span>
+                    <button id="kiosk-btn" class="btn-icon" aria-label="Kiosk mode" title="Kiosk-Modus">&#9974;</button>
+                    <button id="open-settings" class="btn-icon" aria-label="Settings">&#9881;</button>
+                </div>
+            </div>
+
+            <!-- Station Tabs (for single-view with multiple stations) -->
+            <div id="station-tabs" class="station-tabs hidden"></div>
+
+            <!-- Alerts Banner -->
+            <div id="alerts-banner" class="alerts-banner hidden"></div>
+
+            <!-- Single Station Board -->
+            <div id="single-view" class="board">
+                <div class="board-header">
+                    <span class="col-line">Linie</span>
+                    <span class="col-destination">Ziel</span>
+                    <span class="col-platform">Gl.</span>
+                    <span class="col-departure">Abfahrt</span>
+                </div>
+                <div id="departures-list" class="departures-list">
+                    <div class="loading" id="loading-indicator">
+                        <div class="loading-spinner"></div>
+                        <p>Lade Abfahrten...</p>
+                    </div>
+                    <div class="no-station hidden" id="no-station-msg">
+                        <p>Bitte wähle eine Station in den Einstellungen aus.</p>
+                        <button id="open-settings-cta" class="btn-primary">Einstellungen öffnen</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Split View (two stations side by side) -->
+            <div id="split-view" class="split-view hidden">
+                <div class="split-pane" id="split-pane-left">
+                    <div class="split-pane-header" id="split-header-left">Station 1</div>
+                    <div class="board-header">
+                        <span class="col-line">Linie</span>
+                        <span class="col-destination">Ziel</span>
+                        <span class="col-platform">Gl.</span>
+                        <span class="col-departure">Abfahrt</span>
+                    </div>
+                    <div class="departures-list" id="split-departures-left"></div>
+                </div>
+                <div class="split-divider"></div>
+                <div class="split-pane" id="split-pane-right">
+                    <div class="split-pane-header" id="split-header-right">Station 2</div>
+                    <div class="board-header">
+                        <span class="col-line">Linie</span>
+                        <span class="col-destination">Ziel</span>
+                        <span class="col-platform">Gl.</span>
+                        <span class="col-departure">Abfahrt</span>
+                    </div>
+                    <div class="departures-list" id="split-departures-right"></div>
+                </div>
+            </div>
+
+            <!-- LED Panel Emulation View -->
+            <div id="led-view" class="led-view hidden">
+                <div class="led-frame">
+                    <canvas id="led-canvas" width="128" height="32"></canvas>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="display-footer" id="display-footer">
+                <span id="last-update">Letzte Aktualisierung: --:--</span>
+                <span class="data-source">Daten: BVG / VBB</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/led-renderer.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

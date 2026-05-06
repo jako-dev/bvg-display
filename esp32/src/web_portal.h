@@ -1,0 +1,336 @@
+#pragma once
+#include <Arduino.h>
+
+// Embedded HTML for the ESP32 captive portal / config interface
+// This is served at http://192.168.4.1/ when in AP mode,
+// or at the device's IP when connected to WiFi.
+
+String getPortalHTML() {
+    return R"rawhtml(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BVG Display - Einrichtung</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 500px; margin: 0 auto; }
+        h1 { color: #ffcc00; margin-bottom: 8px; font-size: 1.5rem; }
+        h2 { color: #89b4fa; margin: 20px 0 10px; font-size: 1.1rem; }
+        .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 20px; }
+        .card {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            border: 1px solid #2a2a4a;
+        }
+        .status-bar {
+            display: flex; gap: 8px; align-items: center;
+            padding: 10px 14px;
+            background: #0f3460;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 0.85rem;
+        }
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: #ff4444;
+        }
+        .status-dot.connected { background: #44ff44; }
+        label { display: block; font-size: 0.85rem; color: #aaa; margin-bottom: 4px; }
+        input[type="text"], input[type="password"], input[type="search"] {
+            width: 100%; padding: 10px 14px;
+            border: 1px solid #2a2a4a; border-radius: 8px;
+            background: #0f3460; color: #eee;
+            font-size: 0.95rem; outline: none;
+            margin-bottom: 12px;
+        }
+        input:focus { border-color: #89b4fa; }
+        button, .btn {
+            padding: 10px 18px; border: none; border-radius: 8px;
+            font-size: 0.9rem; cursor: pointer;
+            background: #ffcc00; color: #1a1a2e; font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        .btn-secondary { background: #2a2a4a; color: #eee; }
+        .btn-danger { background: #ff4444; color: #fff; }
+        .btn-small { padding: 6px 12px; font-size: 0.8rem; }
+        .wifi-list { list-style: none; margin: 12px 0; }
+        .wifi-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; background: #0f3460; border-radius: 8px;
+            margin-bottom: 8px; cursor: pointer;
+            border: 1px solid transparent; transition: border-color 0.2s;
+        }
+        .wifi-item:hover { border-color: #89b4fa; }
+        .wifi-item .name { font-weight: 500; }
+        .wifi-item .signal { color: #888; font-size: 0.8rem; }
+        .station-list { margin: 12px 0; }
+        .station-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; background: #0f3460; border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .station-item .name { font-size: 0.9rem; }
+        .search-results { margin: 8px 0; }
+        .search-result {
+            padding: 10px 14px; background: #0f3460; border-radius: 8px;
+            margin-bottom: 6px; cursor: pointer;
+            border: 1px solid transparent; transition: border-color 0.2s;
+        }
+        .search-result:hover { border-color: #89b4fa; }
+        .msg { padding: 10px; border-radius: 8px; margin: 10px 0; font-size: 0.85rem; }
+        .msg-success { background: #1a4a2a; color: #44ff44; }
+        .msg-error { background: #4a1a1a; color: #ff4444; }
+        .hidden { display: none; }
+        .loader {
+            display: inline-block; width: 16px; height: 16px;
+            border: 2px solid #333; border-top-color: #ffcc00;
+            border-radius: 50%; animation: spin 0.6s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BVG Abfahrtsmonitor</h1>
+        <p class="subtitle">ESP32 LED Panel Einrichtung</p>
+
+        <div id="status-bar" class="status-bar">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Lade Status...</span>
+        </div>
+
+        <!-- WiFi Setup -->
+        <div class="card">
+            <h2>WLAN-Verbindung</h2>
+            <button class="btn-secondary btn-small" onclick="scanWifi()">Netzwerke suchen</button>
+            <div id="wifi-scanning" class="hidden"><span class="loader"></span> Suche...</div>
+            <ul class="wifi-list" id="wifi-list"></ul>
+            <form id="wifi-form" onsubmit="saveWifi(event)">
+                <label for="ssid">SSID (Netzwerkname)</label>
+                <input type="text" id="ssid" name="ssid" required placeholder="Netzwerkname">
+                <label for="password">Passwort</label>
+                <input type="password" id="password" name="password" placeholder="WLAN-Passwort">
+                <button type="submit">Verbinden & Neustart</button>
+            </form>
+            <div id="wifi-msg"></div>
+        </div>
+
+        <!-- Station Config -->
+        <div class="card">
+            <h2>Stationen</h2>
+            <div class="station-list" id="station-list"></div>
+            <label for="station-search">Station suchen</label>
+            <input type="search" id="station-search" placeholder="z.B. Alexanderplatz..." oninput="searchStation(this.value)">
+            <div id="search-loading" class="hidden"><span class="loader"></span> Suche...</div>
+            <div class="search-results" id="search-results"></div>
+            <div id="station-msg"></div>
+        </div>
+
+        <!-- Display Settings -->
+        <div class="card">
+            <h2>Anzeige</h2>
+            <label for="dep-count">Anzahl Abfahrten</label>
+            <select id="dep-count" onchange="saveDepCount(this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
+                <option value="3">3</option>
+                <option value="6">6</option>
+                <option value="9">9</option>
+                <option value="12">12</option>
+                <option value="15">15</option>
+            </select>
+            <div id="display-msg"></div>
+        </div>
+
+        <!-- Info -->
+        <div class="card">
+            <h2>Info</h2>
+            <p style="font-size:0.8rem; color:#888;">
+                Nach der WLAN-Einrichtung ist dieses Interface unter der IP-Adresse des Geraets erreichbar.
+                Die LED-Anzeige aktualisiert sich automatisch alle 30 Sekunden.
+            </p>
+        </div>
+    </div>
+
+    <script>
+    let statusData = {};
+
+    async function loadStatus() {
+        try {
+            const r = await fetch('/api/status');
+            statusData = await r.json();
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            if (statusData.wifi_connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Verbunden mit ' + statusData.wifi_ssid + ' (' + statusData.ip + ')';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Nicht verbunden — bitte WLAN einrichten';
+            }
+            renderStations();
+        } catch(e) {
+            document.getElementById('status-text').textContent = 'Fehler beim Laden';
+        }
+    }
+
+    async function scanWifi() {
+        document.getElementById('wifi-scanning').classList.remove('hidden');
+        document.getElementById('wifi-list').innerHTML = '';
+        try {
+            const r = await fetch('/api/wifi/scan');
+            const data = await r.json();
+            document.getElementById('wifi-scanning').classList.add('hidden');
+            const list = document.getElementById('wifi-list');
+            list.innerHTML = data.networks.map(n => 
+                '<li class="wifi-item" onclick="selectWifi(\'' + n.ssid.replace(/'/g, "\\'") + '\')">' +
+                '<span class="name">' + n.ssid + (n.encrypted ? ' 🔒' : '') + '</span>' +
+                '<span class="signal">' + n.rssi + ' dBm</span></li>'
+            ).join('');
+        } catch(e) {
+            document.getElementById('wifi-scanning').classList.add('hidden');
+            document.getElementById('wifi-list').innerHTML = '<li class="wifi-item">Scan fehlgeschlagen</li>';
+        }
+    }
+
+    function selectWifi(ssid) {
+        document.getElementById('ssid').value = ssid;
+        document.getElementById('password').focus();
+    }
+
+    async function saveWifi(e) {
+        e.preventDefault();
+        const ssid = document.getElementById('ssid').value;
+        const password = document.getElementById('password').value;
+        const msgEl = document.getElementById('wifi-msg');
+        try {
+            const r = await fetch('/api/wifi', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password)
+            });
+            const data = await r.json();
+            msgEl.innerHTML = '<div class="msg msg-success">' + data.msg + '</div>';
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler beim Speichern</div>';
+        }
+    }
+
+    function renderStations() {
+        const list = document.getElementById('station-list');
+        if (!statusData.stations || statusData.stations.length === 0) {
+            list.innerHTML = '<p style="color:#888;font-size:0.85rem;">Keine Stationen gespeichert.</p>';
+            return;
+        }
+        list.innerHTML = statusData.stations.map(s =>
+            '<div class="station-item"><span class="name">' + s.name + '</span>' +
+            '<button class="btn-danger btn-small" onclick="removeStation(\'' + s.id + '\')">Entfernen</button></div>'
+        ).join('');
+    }
+
+    let searchTimeout;
+    async function searchStation(query) {
+        clearTimeout(searchTimeout);
+        if (query.length < 2) {
+            document.getElementById('search-results').innerHTML = '';
+            return;
+        }
+        searchTimeout = setTimeout(async () => {
+            document.getElementById('search-loading').classList.remove('hidden');
+            try {
+                const r = await fetch('/api/stations/search?q=' + encodeURIComponent(query));
+                const data = await r.json();
+                document.getElementById('search-loading').classList.add('hidden');
+                const results = Array.isArray(data) ? data.filter(x => x.type === 'stop') : [];
+                document.getElementById('search-results').innerHTML = results.map(s =>
+                    '<div class="search-result" onclick="addStation(\'' + s.id + '\', \'' + 
+                    s.name.replace(/'/g, "\\'") + '\')">' + s.name + '</div>'
+                ).join('');
+            } catch(e) {
+                document.getElementById('search-loading').classList.add('hidden');
+                document.getElementById('search-results').innerHTML = '<div class="search-result">Fehler</div>';
+            }
+        }, 400);
+    }
+
+    async function addStation(id, name) {
+        const msgEl = document.getElementById('station-msg');
+        try {
+            const r = await fetch('/api/stations', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'id=' + encodeURIComponent(id) + '&name=' + encodeURIComponent(name)
+            });
+            const data = await r.json();
+            if (data.ok) {
+                msgEl.innerHTML = '<div class="msg msg-success">' + name + ' hinzugefuegt!</div>';
+                document.getElementById('search-results').innerHTML = '';
+                document.getElementById('station-search').value = '';
+                loadStatus();
+            } else {
+                msgEl.innerHTML = '<div class="msg msg-error">' + data.msg + '</div>';
+            }
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+        }
+    }
+
+    async function removeStation(id) {
+        try {
+            await fetch('/api/stations/remove', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'id=' + encodeURIComponent(id)
+            });
+            loadStatus();
+        } catch(e) {}
+    }
+
+    async function saveDepCount(val) {
+        const msgEl = document.getElementById('display-msg');
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'dep_count=' + encodeURIComponent(val)
+            });
+            const data = await res.json();
+            if (data.ok) {
+                msgEl.innerHTML = '<div class="msg msg-ok">Gespeichert</div>';
+            } else {
+                msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+            }
+            setTimeout(() => msgEl.innerHTML = '', 2000);
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+        }
+    }
+
+    async function loadDepCount() {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            if (data.dep_count) {
+                document.getElementById('dep-count').value = data.dep_count;
+            }
+        } catch(e) {}
+    }
+
+    // Init
+    loadStatus();
+    loadDepCount();
+    </script>
+</body>
+</html>
+)rawhtml";
+}
