@@ -1,0 +1,30 @@
+name: Build & Release Firmware
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: cd esp32 && pio run -e esp32dev
+
+      - name: Rename firmware binary
+        run: cp esp32/.pio/build/esp32dev/firmware.bin bvg-display.bin
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bvg-display.bin
