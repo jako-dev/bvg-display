@@ -16,6 +16,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+#include <Update.h>
 
 #include "config.h"
 #include "font.h"
@@ -34,6 +35,7 @@ AppMode appMode = MODE_AP_SETUP;
 struct Station {
     String id;
     String name;
+    int walkTime;  // Minutes to walk to this station
 };
 
 struct Departure {
@@ -53,23 +55,25 @@ int departureCount = 0;
 int depCountSetting = 6;
 bool scrollEnabled = false;       // Scroll disabled by default: show first 3
 int scrollSpeedSetting = 3000;    // ms between scroll steps
-int walkTimeSetting = 0;          // Minutes walk time to station
 
 String wifiSSID = "";
 String wifiPassword = "";
 unsigned long lastFetchTime = 0;
 unsigned long lastScrollTime = 0;
+unsigned long lastWifiCheck = 0;
 int scrollOffset = 0;
+bool ntpSynced = false;
 
 // ===== Forward Declarations =====
 void setupMatrix();
 void setupAP();
 void setupWebServer();
 void connectWiFi();
+void checkWiFiReconnect();
+void syncNTP();
 void fetchDepartures();
 void parseDeparturesAppend(const String& json);
 void sortDepartures();
-void filterByWalkTime();
 void renderDisplay();
 void renderSetupScreen();
 void loadSettings();
@@ -96,6 +100,7 @@ void setup() {
         setupAP();
     } else {
         appMode = MODE_RUNNING;
+        syncNTP();
     }
 
     setupWebServer();
@@ -114,9 +119,17 @@ void loop() {
     // Running mode
     unsigned long now = millis();
 
+    // Check WiFi connectivity every 30s
+    if (now - lastWifiCheck >= 30000) {
+        checkWiFiReconnect();
+        lastWifiCheck = now;
+    }
+
     // Fetch departures periodically
     if (now - lastFetchTime >= BVG_REFRESH_INTERVAL || lastFetchTime == 0) {
-        fetchDepartures();
+        if (WiFi.status() == WL_CONNECTED && ntpSynced) {
+            fetchDepartures();
+        }
         lastFetchTime = now;
     }
 
@@ -171,6 +184,7 @@ void setupAP() {
 
 void connectWiFi() {
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
     
     unsigned long start = millis();
@@ -184,6 +198,40 @@ void connectWiFi() {
     } else {
         Serial.println("\nWiFi connection failed");
         WiFi.disconnect();
+    }
+}
+
+void checkWiFiReconnect() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi lost, reconnecting...");
+        WiFi.disconnect();
+        WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
+            delay(100);
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("WiFi reconnected: " + WiFi.localIP().toString());
+        }
+    }
+}
+
+void syncNTP() {
+    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+    Serial.print("Syncing NTP");
+    int attempts = 0;
+    struct tm timeinfo;
+    while (!getLocalTime(&timeinfo) && attempts < 10) {
+        Serial.print(".");
+        delay(500);
+        attempts++;
+    }
+    if (attempts < 10) {
+        ntpSynced = true;
+        Serial.println(" OK");
+    } else {
+        ntpSynced = true; // Allow operation with potentially wrong time
+        Serial.println(" TIMEOUT (proceeding anyway)");
     }
 }
 
@@ -220,6 +268,7 @@ void setupWebServer() {
             JsonObject st = stArr.add<JsonObject>();
             st["id"] = stations[i].id;
             st["name"] = stations[i].name;
+            st["walk_time"] = stations[i].walkTime;
         }
 
         String response;
@@ -264,18 +313,23 @@ void setupWebServer() {
             request->send(400, "application/json", "{\"error\":\"Missing q param\"}");
             return;
         }
+        if (WiFi.status() != WL_CONNECTED) {
+            request->send(503, "application/json", "{\"error\":\"WiFi not connected\"}");
+            return;
+        }
         String query = request->getParam("q")->value();
         
         HTTPClient http;
         String url = "https://" + String(BVG_API_HOST) + "/locations?query=" + 
                      urlEncode(query) + "&results=5&stops=true&addresses=false&poi=false&pretty=false";
         http.begin(url);
+        http.setTimeout(8000);
         int httpCode = http.GET();
         
         if (httpCode == 200) {
             request->send(200, "application/json", http.getString());
         } else {
-            request->send(502, "application/json", "{\"error\":\"API request failed\"}");
+            request->send(502, "application/json", "{\"error\":\"API request failed\",\"code\":" + String(httpCode) + "}");
         }
         http.end();
     });
@@ -297,6 +351,10 @@ void setupWebServer() {
             }
             stations[stationCount].id = id;
             stations[stationCount].name = request->getParam("name", true)->value();
+            stations[stationCount].walkTime = 0;
+            if (request->hasParam("walk_time", true)) {
+                stations[stationCount].walkTime = request->getParam("walk_time", true)->value().toInt();
+            }
             stationCount++;
             saveSettings();
             lastFetchTime = 0; // Trigger immediate refresh
@@ -328,13 +386,34 @@ void setupWebServer() {
         }
     });
 
+    // API: Update station walk time
+    server.on("/api/stations/walktime", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (request->hasParam("id", true) && request->hasParam("walk_time", true)) {
+            String id = request->getParam("id", true)->value();
+            int wt = request->getParam("walk_time", true)->value().toInt();
+            if (wt < 0) wt = 0;
+            if (wt > 30) wt = 30;
+            for (int i = 0; i < stationCount; i++) {
+                if (stations[i].id == id) {
+                    stations[i].walkTime = wt;
+                    saveSettings();
+                    lastFetchTime = 0; // Trigger refresh
+                    request->send(200, "application/json", "{\"ok\":true}");
+                    return;
+                }
+            }
+            request->send(404, "application/json", "{\"ok\":false,\"msg\":\"Station not found\"}");
+        } else {
+            request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing id or walk_time\"}");
+        }
+    });
+
     // Settings GET
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* request) {
         JsonDocument doc;
         doc["dep_count"] = depCountSetting;
         doc["scroll_enabled"] = scrollEnabled;
         doc["scroll_speed"] = scrollSpeedSetting;
-        doc["walk_time"] = walkTimeSetting;
         String response;
         serializeJson(doc, response);
         request->send(200, "application/json", response);
@@ -361,19 +440,195 @@ void setupWebServer() {
                 changed = true;
             }
         }
-        if (request->hasParam("walk_time", true)) {
-            int val = request->getParam("walk_time", true)->value().toInt();
-            if (val >= 0 && val <= 30) {
-                walkTimeSetting = val;
-                changed = true;
-            }
-        }
         if (changed) {
             saveSettings();
             request->send(200, "application/json", "{\"ok\":true}");
         } else {
             request->send(400, "application/json", "{\"ok\":false,\"msg\":\"No valid params\"}");
         }
+    });
+
+    // API: Check for firmware update (GitHub releases)
+    server.on("/api/firmware/check", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (WiFi.status() != WL_CONNECTED) {
+            request->send(503, "application/json", "{\"error\":\"WiFi not connected\"}");
+            return;
+        }
+        HTTPClient http;
+        http.begin(GITHUB_RELEASE_URL);
+        http.setTimeout(10000);
+        http.addHeader("User-Agent", "ESP32-BVG-Display");
+        int httpCode = http.GET();
+        if (httpCode != 200) {
+            request->send(502, "application/json", "{\"error\":\"GitHub API error\",\"code\":" + String(httpCode) + "}");
+            http.end();
+            return;
+        }
+        String payload = http.getString();
+        http.end();
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, payload);
+        if (err) {
+            request->send(500, "application/json", "{\"error\":\"JSON parse failed\"}");
+            return;
+        }
+
+        String tagName = doc["tag_name"] | "";
+        String releaseName = doc["name"] | tagName;
+        String body = doc["body"] | "";
+        String downloadUrl = "";
+
+        JsonArray assets = doc["assets"].as<JsonArray>();
+        for (JsonObject asset : assets) {
+            String name = asset["name"] | "";
+            if (name == FW_ASSET_NAME) {
+                downloadUrl = asset["browser_download_url"].as<String>();
+                break;
+            }
+        }
+
+        JsonDocument resp;
+        resp["current_version"] = FW_VERSION;
+        resp["latest_version"] = tagName;
+        resp["release_name"] = releaseName;
+        resp["release_notes"] = body;
+        resp["download_url"] = downloadUrl;
+        resp["update_available"] = (tagName != "" && tagName != "v" + String(FW_VERSION) && tagName != String(FW_VERSION));
+        String response;
+        serializeJson(resp, response);
+        request->send(200, "application/json", response);
+    });
+
+    // API: OTA update from URL (GitHub release asset)
+    server.on("/api/firmware/update", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!request->hasParam("url", true)) {
+            request->send(400, "application/json", "{\"error\":\"Missing url param\"}");
+            return;
+        }
+        String url = request->getParam("url", true)->value();
+        // Only allow downloads from GitHub
+        if (!url.startsWith("https://github.com/") && !url.startsWith("https://objects.githubusercontent.com/")) {
+            request->send(400, "application/json", "{\"error\":\"URL must be from github.com\"}");
+            return;
+        }
+
+        request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Starting OTA update...\"}");
+
+        // Perform OTA in a delayed task to allow response to be sent
+        static String otaUrl;
+        otaUrl = url;
+        xTaskCreatePinnedToCore([](void* param) {
+            delay(500); // Let HTTP response finish
+            HTTPClient http;
+            http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            http.begin(otaUrl);
+            http.setTimeout(30000);
+            http.addHeader("User-Agent", "ESP32-BVG-Display");
+            int httpCode = http.GET();
+
+            if (httpCode != 200) {
+                Serial.printf("[OTA] Download failed, HTTP %d\n", httpCode);
+                http.end();
+                vTaskDelete(NULL);
+                return;
+            }
+
+            int contentLength = http.getSize();
+            if (contentLength <= 0) {
+                Serial.println("[OTA] Invalid content length");
+                http.end();
+                vTaskDelete(NULL);
+                return;
+            }
+
+            WiFiClient* stream = http.getStreamPtr();
+            // Validate ESP32 firmware magic byte
+            uint8_t firstByte;
+            if (stream->peek() != 0xE9) {
+                Serial.println("[OTA] Invalid firmware (bad magic byte)");
+                http.end();
+                vTaskDelete(NULL);
+                return;
+            }
+
+            if (!Update.begin(contentLength)) {
+                Serial.printf("[OTA] Not enough space: %d\n", contentLength);
+                http.end();
+                vTaskDelete(NULL);
+                return;
+            }
+
+            Serial.printf("[OTA] Starting update, %d bytes\n", contentLength);
+            size_t written = Update.writeStream(*stream);
+            if (written == (size_t)contentLength) {
+                Serial.println("[OTA] Written successfully");
+            } else {
+                Serial.printf("[OTA] Written only %d/%d\n", written, contentLength);
+            }
+
+            if (Update.end()) {
+                if (Update.isFinished()) {
+                    Serial.println("[OTA] Update success! Rebooting...");
+                    delay(500);
+                    ESP.restart();
+                } else {
+                    Serial.println("[OTA] Update not finished");
+                }
+            } else {
+                Serial.printf("[OTA] Update error: %s\n", Update.errorString());
+            }
+
+            http.end();
+            vTaskDelete(NULL);
+        }, "ota_task", 8192, NULL, 1, NULL, 0);
+    });
+
+    // API: Manual firmware upload
+    server.on("/api/firmware/upload", HTTP_POST,
+        // Response handler (called after upload completes)
+        [](AsyncWebServerRequest* request) {
+            if (Update.hasError()) {
+                request->send(500, "application/json", "{\"ok\":false,\"msg\":\"" + String(Update.errorString()) + "\"}");
+            } else {
+                request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Update successful! Rebooting...\"}");
+                delay(500);
+                ESP.restart();
+            }
+        },
+        // Upload handler (called for each chunk)
+        [](AsyncWebServerRequest* request, const String& filename, size_t index, uint8_t* data, size_t len, bool final) {
+            if (index == 0) {
+                Serial.printf("[OTA] Upload start: %s\n", filename.c_str());
+                // Validate magic byte
+                if (len > 0 && data[0] != 0xE9) {
+                    Serial.println("[OTA] Invalid firmware file");
+                    Update.abort();
+                    return;
+                }
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Serial.printf("[OTA] Begin failed: %s\n", Update.errorString());
+                    return;
+                }
+            }
+            if (Update.isRunning()) {
+                if (Update.write(data, len) != len) {
+                    Serial.printf("[OTA] Write failed: %s\n", Update.errorString());
+                }
+            }
+            if (final) {
+                if (Update.end(true)) {
+                    Serial.printf("[OTA] Upload complete: %u bytes\n", index + len);
+                } else {
+                    Serial.printf("[OTA] Upload end failed: %s\n", Update.errorString());
+                }
+            }
+        }
+    );
+
+    // API: Get firmware version
+    server.on("/api/firmware/version", HTTP_GET, [](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", "{\"version\":\"" + String(FW_VERSION) + "\"}");
     });
 
     // Catch-all for captive portal
@@ -404,18 +659,34 @@ void fetchDepartures() {
 
         if (httpCode == 200) {
             String payload = http.getString();
+            int countBefore = departureCount;
             parseDeparturesAppend(payload);
-            Serial.println("Station " + stations[s].name + ": OK");
+            // Filter this station's departures by its walk time
+            if (stations[s].walkTime > 0) {
+                int writeIdx = countBefore;
+                for (int i = countBefore; i < departureCount; i++) {
+                    if (departures[i].minutesUntil >= stations[s].walkTime) {
+                        if (writeIdx != i) departures[writeIdx] = departures[i];
+                        writeIdx++;
+                    }
+                }
+                departureCount = writeIdx;
+            }
+            Serial.println("Station " + stations[s].name + ": OK (" + String(departureCount - countBefore) + " deps)");
+        } else if (httpCode == 429) {
+            Serial.println("Rate limited for " + stations[s].name + ", skipping remaining");
+            break; // Don't hammer the API
         } else {
             Serial.println("API error for " + stations[s].name + ": " + String(httpCode));
         }
         http.end();
+
+        // Small delay between multi-station fetches to avoid rate limiting
+        if (s < stationCount - 1) delay(200);
     }
 
     // Sort merged departures by minutesUntil
     sortDepartures();
-    // Filter by walk time
-    filterByWalkTime();
     scrollOffset = 0;
     Serial.println("Total merged departures: " + String(departureCount));
 }
@@ -429,6 +700,11 @@ void parseDeparturesAppend(const String& json) {
     }
 
     JsonArray deps = doc["departures"].as<JsonArray>();
+    if (deps.isNull()) {
+        // Fallback: some API versions return array directly
+        deps = doc.as<JsonArray>();
+        if (deps.isNull()) return;
+    }
 
     for (JsonObject dep : deps) {
         if (departureCount >= BVG_MAX_DEPARTURES) break;
@@ -441,48 +717,54 @@ void parseDeparturesAppend(const String& json) {
         d.delaySeconds = dep["delay"] | 0;
 
         // Calculate minutes until departure
-        const char* whenStr = dep["when"] | dep["plannedWhen"];
+        const char* whenStr = dep["when"] | (const char*)nullptr;
+        if (!whenStr) whenStr = dep["plannedWhen"] | (const char*)nullptr;
+        
         if (whenStr) {
-            // Parse ISO time — simplified: use the offset from 'when'
-            // The API returns times like "2026-05-06T13:09:00+02:00"
+            // Parse ISO 8601: "2026-05-06T13:09:00+02:00"
             struct tm tm = {};
             int tzHour = 0, tzMin = 0;
             char tzSign = '+';
-            sscanf(whenStr, "%d-%d-%dT%d:%d:%d%c%d:%d",
+            int parsed = sscanf(whenStr, "%d-%d-%dT%d:%d:%d%c%d:%d",
                    &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
                    &tm.tm_hour, &tm.tm_min, &tm.tm_sec,
                    &tzSign, &tzHour, &tzMin);
-            tm.tm_year -= 1900;
-            tm.tm_mon -= 1;
             
-            time_t depTime = mktime(&tm);
-            // Adjust for timezone
-            int tzOffset = (tzHour * 3600 + tzMin * 60) * (tzSign == '+' ? -1 : 1);
-            depTime += tzOffset;
-            
-            time_t now;
-            time(&now);
-            d.minutesUntil = (int)((depTime - now) / 60);
-            if (d.minutesUntil < 0) d.minutesUntil = 0;
+            if (parsed >= 6) {
+                tm.tm_year -= 1900;
+                tm.tm_mon -= 1;
+                tm.tm_isdst = 0;
+                
+                // mktime interprets tm as local time, but we want to treat it
+                // as the timezone specified in the string. Convert to UTC.
+                // First get the epoch assuming UTC (using timegm equivalent)
+                time_t depEpoch = mktime(&tm);
+                // mktime assumes local time (CET/CEST due to configTzTime),
+                // so correct for local timezone offset
+                struct tm check;
+                localtime_r(&depEpoch, &check);
+                depEpoch += check.tm_gmtoff; // Now it's as if tm was UTC
+                
+                // Apply the string's timezone offset to get true UTC
+                int tzOffsetSec = (tzHour * 3600 + tzMin * 60);
+                if (tzSign == '+') depEpoch -= tzOffsetSec;
+                else depEpoch += tzOffsetSec;
+                
+                // time() on ESP32 returns UTC epoch
+                time_t nowUtc;
+                time(&nowUtc);
+                
+                d.minutesUntil = (int)((depEpoch - nowUtc) / 60);
+                if (d.minutesUntil < 0) d.minutesUntil = 0;
+            } else {
+                d.minutesUntil = -1;
+            }
         } else {
             d.minutesUntil = -1;
         }
 
         departureCount++;
     }
-}
-
-// Filter departures by walk time (remove unreachable ones)
-void filterByWalkTime() {
-    if (walkTimeSetting <= 0) return;
-    int writeIdx = 0;
-    for (int i = 0; i < departureCount; i++) {
-        if (departures[i].minutesUntil >= walkTimeSetting) {
-            if (writeIdx != i) departures[writeIdx] = departures[i];
-            writeIdx++;
-        }
-    }
-    departureCount = writeIdx;
 }
 
 // Sort departures by minutesUntil (ascending)
@@ -661,11 +943,11 @@ void loadSettings() {
     depCountSetting = prefs.getInt("depCount", 6);
     scrollEnabled = prefs.getBool("scrollOn", false);
     scrollSpeedSetting = prefs.getInt("scrollSpd", 3000);
-    walkTimeSetting = prefs.getInt("walkTime", 0);
     
     for (int i = 0; i < stationCount && i < MAX_STATIONS; i++) {
         stations[i].id = prefs.getString(("st_id_" + String(i)).c_str(), "");
         stations[i].name = prefs.getString(("st_nm_" + String(i)).c_str(), "");
+        stations[i].walkTime = prefs.getInt(("st_wt_" + String(i)).c_str(), 0);
     }
     prefs.end();
     
@@ -680,11 +962,11 @@ void saveSettings() {
     prefs.putInt("depCount", depCountSetting);
     prefs.putBool("scrollOn", scrollEnabled);
     prefs.putInt("scrollSpd", scrollSpeedSetting);
-    prefs.putInt("walkTime", walkTimeSetting);
     
     for (int i = 0; i < stationCount; i++) {
         prefs.putString(("st_id_" + String(i)).c_str(), stations[i].id);
         prefs.putString(("st_nm_" + String(i)).c_str(), stations[i].name);
+        prefs.putInt(("st_wt_" + String(i)).c_str(), stations[i].walkTime);
     }
     prefs.end();
 }

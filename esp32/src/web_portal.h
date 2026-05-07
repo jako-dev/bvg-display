@@ -163,9 +163,6 @@ String getPortalHTML() {
                 <option value="8000">8s (Langsam)</option>
             </select>
             <p style="font-size:0.75rem;color:#888;margin-top:4px;">Wenn Scrollen deaktiviert ist, werden nur die naechsten 3 Abfahrten angezeigt.</p>
-            <label for="walk-time" style="margin-top:12px;">Fussweg zur Haltestelle (Minuten)</label>
-            <input type="number" id="walk-time" min="0" max="30" value="0" onchange="saveSetting('walk_time', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
-            <p style="font-size:0.75rem;color:#888;">Nur Abfahrten anzeigen die noch erreichbar sind.</p>
             <div id="display-msg"></div>
         </div>
 
@@ -176,6 +173,36 @@ String getPortalHTML() {
                 Nach der WLAN-Einrichtung ist dieses Interface unter der IP-Adresse des Geraets erreichbar.
                 Die LED-Anzeige aktualisiert sich automatisch alle 30 Sekunden.
             </p>
+        </div>
+
+        <!-- Firmware Update -->
+        <div class="card">
+            <h2>Firmware Update</h2>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <span style="font-size:0.85rem;color:#888;">Aktuelle Version:</span>
+                <span id="fw-current" style="font-size:0.85rem;font-weight:bold;color:#89b4fa;">...</span>
+            </div>
+            <button class="btn" onclick="checkFirmwareUpdate()" style="width:100%;margin-bottom:12px;">Nach Updates suchen</button>
+            <div id="fw-status"></div>
+            <div id="fw-update-info" class="hidden" style="margin-top:12px;padding:12px;background:#0f3460;border-radius:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:0.85rem;color:#ccc;">Neue Version:</span>
+                    <span id="fw-latest" style="font-size:0.85rem;font-weight:bold;color:#a6e3a1;"></span>
+                </div>
+                <div id="fw-notes" style="font-size:0.75rem;color:#888;margin-bottom:10px;max-height:100px;overflow-y:auto;white-space:pre-wrap;"></div>
+                <button class="btn" id="fw-install-btn" onclick="installFirmwareUpdate()" style="width:100%;background:#a6e3a1;color:#1a1a2e;">Update installieren</button>
+            </div>
+            <hr style="border-color:#2a2a4a;margin:16px 0;">
+            <p style="font-size:0.8rem;color:#888;margin-bottom:8px;">Oder manuell eine .bin-Datei hochladen:</p>
+            <input type="file" id="fw-file" accept=".bin" style="font-size:0.8rem;color:#888;margin-bottom:8px;">
+            <button class="btn" onclick="uploadFirmware()" style="width:100%;">Manuell flashen</button>
+            <div id="fw-upload-progress" class="hidden" style="margin-top:10px;">
+                <div style="background:#2a2a4a;border-radius:6px;overflow:hidden;height:8px;">
+                    <div id="fw-progress-bar" style="height:100%;background:#a6e3a1;width:0%;transition:width 0.3s;"></div>
+                </div>
+                <span id="fw-progress-text" style="font-size:0.75rem;color:#888;">0%</span>
+            </div>
+            <div id="fw-upload-msg"></div>
         </div>
     </div>
 
@@ -250,12 +277,24 @@ String getPortalHTML() {
             return;
         }
         list.innerHTML = statusData.stations.map(s =>
-            '<div class="station-item"><span class="name">' + s.name + '</span>' +
-            '<button class="btn-danger btn-small" onclick="removeStation(\'' + s.id + '\')">Entfernen</button></div>'
+            '<div class="station-item">' +
+            '<span class="name">' + escHtml(s.name) + '</span>' +
+            '<div style="display:flex;align-items:center;gap:6px;">' +
+            '<input type="number" min="0" max="30" value="' + (s.walk_time || 0) + '" ' +
+            'onchange="updateWalkTime(\'' + s.id + '\', this.value)" ' +
+            'style="width:50px;padding:4px 6px;border:1px solid #2a2a4a;border-radius:6px;background:#0f3460;color:#eee;text-align:center;font-size:0.85rem;" title="Fussweg (Minuten)">' +
+            '<span style="font-size:0.7rem;color:#888;">min</span>' +
+            '<button class="btn-danger btn-small" onclick="removeStation(\'' + s.id + '\')">Entfernen</button>' +
+            '</div></div>'
         ).join('');
     }
 
     let searchTimeout;
+    function escHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
     async function searchStation(query) {
         clearTimeout(searchTimeout);
         if (query.length < 2) {
@@ -271,7 +310,7 @@ String getPortalHTML() {
                 const results = Array.isArray(data) ? data.filter(x => x.type === 'stop') : [];
                 document.getElementById('search-results').innerHTML = results.map(s =>
                     '<div class="search-result" onclick="addStation(\'' + s.id + '\', \'' + 
-                    s.name.replace(/'/g, "\\'") + '\')">' + s.name + '</div>'
+                    escHtml(s.name).replace(/'/g, "\\'") + '\')">' + escHtml(s.name) + '</div>'
                 ).join('');
             } catch(e) {
                 document.getElementById('search-loading').classList.add('hidden');
@@ -313,6 +352,16 @@ String getPortalHTML() {
         } catch(e) {}
     }
 
+    async function updateWalkTime(id, val) {
+        try {
+            await fetch('/api/stations/walktime', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'id=' + encodeURIComponent(id) + '&walk_time=' + encodeURIComponent(val)
+            });
+        } catch(e) {}
+    }
+
     async function saveDepCount(val) {
         await saveSetting('dep_count', val);
     }
@@ -348,13 +397,140 @@ String getPortalHTML() {
             if (data.scroll_speed) {
                 document.getElementById('scroll-speed').value = data.scroll_speed;
             }
-            document.getElementById('walk-time').value = data.walk_time || 0;
         } catch(e) {}
     }
 
     // Init
     loadStatus();
     loadSettings();
+    loadFirmwareVersion();
+
+    async function loadFirmwareVersion() {
+        try {
+            const r = await fetch('/api/firmware/version');
+            const data = await r.json();
+            document.getElementById('fw-current').textContent = 'v' + data.version;
+        } catch(e) {
+            document.getElementById('fw-current').textContent = 'Unbekannt';
+        }
+    }
+
+    async function checkFirmwareUpdate() {
+        const statusEl = document.getElementById('fw-status');
+        const infoEl = document.getElementById('fw-update-info');
+        infoEl.classList.add('hidden');
+        statusEl.innerHTML = '<div class="msg" style="color:#888;">Suche nach Updates...</div>';
+        try {
+            const r = await fetch('/api/firmware/check');
+            const data = await r.json();
+            if (data.error) {
+                statusEl.innerHTML = '<div class="msg msg-error">' + escHtml(data.error) + '</div>';
+                return;
+            }
+            if (data.update_available && data.download_url) {
+                statusEl.innerHTML = '<div class="msg msg-success">Neues Update verfuegbar!</div>';
+                document.getElementById('fw-latest').textContent = data.latest_version;
+                document.getElementById('fw-notes').textContent = data.release_notes || 'Keine Release-Notizen.';
+                document.getElementById('fw-install-btn').dataset.url = data.download_url;
+                infoEl.classList.remove('hidden');
+            } else if (data.update_available && !data.download_url) {
+                statusEl.innerHTML = '<div class="msg msg-error">Update gefunden (' + escHtml(data.latest_version) + ') aber keine .bin Datei im Release.</div>';
+            } else {
+                statusEl.innerHTML = '<div class="msg msg-success">Firmware ist aktuell (' + escHtml(data.current_version) + ')</div>';
+            }
+        } catch(e) {
+            statusEl.innerHTML = '<div class="msg msg-error">Verbindungsfehler</div>';
+        }
+    }
+
+    async function installFirmwareUpdate() {
+        const btn = document.getElementById('fw-install-btn');
+        const url = btn.dataset.url;
+        if (!url) return;
+        btn.disabled = true;
+        btn.textContent = 'Update wird installiert...';
+        const statusEl = document.getElementById('fw-status');
+        try {
+            const r = await fetch('/api/firmware/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'url=' + encodeURIComponent(url)
+            });
+            const data = await r.json();
+            if (data.ok) {
+                statusEl.innerHTML = '<div class="msg msg-success">Update gestartet! Das Geraet startet in wenigen Sekunden neu...</div>';
+                btn.textContent = 'Neustart...';
+                setTimeout(() => { location.reload(); }, 15000);
+            } else {
+                statusEl.innerHTML = '<div class="msg msg-error">' + (data.msg || data.error) + '</div>';
+                btn.disabled = false;
+                btn.textContent = 'Update installieren';
+            }
+        } catch(e) {
+            statusEl.innerHTML = '<div class="msg msg-error">Fehler beim Starten des Updates</div>';
+            btn.disabled = false;
+            btn.textContent = 'Update installieren';
+        }
+    }
+
+    async function uploadFirmware() {
+        const fileInput = document.getElementById('fw-file');
+        const msgEl = document.getElementById('fw-upload-msg');
+        const progressEl = document.getElementById('fw-upload-progress');
+        const progressBar = document.getElementById('fw-progress-bar');
+        const progressText = document.getElementById('fw-progress-text');
+
+        if (!fileInput.files.length) {
+            msgEl.innerHTML = '<div class="msg msg-error">Bitte eine .bin Datei auswaehlen</div>';
+            return;
+        }
+
+        const file = fileInput.files[0];
+        if (!file.name.endsWith('.bin')) {
+            msgEl.innerHTML = '<div class="msg msg-error">Nur .bin Dateien erlaubt</div>';
+            return;
+        }
+
+        msgEl.innerHTML = '';
+        progressEl.classList.remove('hidden');
+        progressBar.style.width = '0%';
+        progressText.textContent = '0%';
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/firmware/upload');
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = pct + '%';
+                progressText.textContent = pct + '%';
+            }
+        };
+
+        xhr.onload = function() {
+            try {
+                const data = JSON.parse(xhr.responseText);
+                if (data.ok) {
+                    msgEl.innerHTML = '<div class="msg msg-success">' + data.msg + '</div>';
+                    progressBar.style.width = '100%';
+                    progressText.textContent = '100%';
+                    setTimeout(() => { location.reload(); }, 10000);
+                } else {
+                    msgEl.innerHTML = '<div class="msg msg-error">' + (data.msg || 'Upload fehlgeschlagen') + '</div>';
+                }
+            } catch(e) {
+                msgEl.innerHTML = '<div class="msg msg-error">Unerwarteter Fehler</div>';
+            }
+        };
+
+        xhr.onerror = function() {
+            msgEl.innerHTML = '<div class="msg msg-error">Verbindung verloren</div>';
+        };
+
+        const formData = new FormData();
+        formData.append('firmware', file);
+        xhr.send(formData);
+    }
     </script>
 </body>
 </html>

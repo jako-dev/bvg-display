@@ -6,7 +6,7 @@
 
     // ===== State =====
     const state = {
-        stations: [],           // Saved stations [{id, name}]
+        stations: [],           // Saved stations [{id, name, walkTime}]
         activeStationId: null,  // Currently displayed station
         departures: [],         // Current departure data
         departureCount: 6,      // Number of departures to fetch
@@ -17,7 +17,6 @@
         kioskMode: false,
         ledScrollEnabled: true, // Scroll through departures in LED mode
         ledScrollSpeed: 3000,   // ms between scroll steps
-        walkTime: 0,            // Minutes to walk to station
         filters: {
             suburban: true,
             subway: true,
@@ -67,7 +66,6 @@
         ledCanvas: document.getElementById('led-canvas'),
         ledScrollToggle: document.getElementById('led-scroll-toggle'),
         ledScrollSpeed: document.getElementById('led-scroll-speed'),
-        walkTime: document.getElementById('walk-time'),
         // Kiosk
         kioskBtn: document.getElementById('kiosk-btn'),
         kioskToggle: document.getElementById('kiosk-toggle'),
@@ -99,6 +97,15 @@
         } else {
             showNoStationMessage();
         }
+
+        // Pause/resume refresh on visibility change
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopRefreshTimer();
+            } else if (state.stations.length > 0) {
+                showDepartures(); // Immediate refresh + restart timer
+            }
+        });
     }
 
     // ===== Persistence =====
@@ -116,7 +123,6 @@
                 state.kioskMode = parsed.kioskMode || false;
                 state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
                 state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
-                state.walkTime = parsed.walkTime || 0;
                 state.filters = { ...state.filters, ...parsed.filters };
             }
         } catch (e) {
@@ -136,7 +142,6 @@
                 kioskMode: state.kioskMode,
                 ledScrollEnabled: state.ledScrollEnabled,
                 ledScrollSpeed: state.ledScrollSpeed,
-                walkTime: state.walkTime,
                 filters: state.filters
             }));
         } catch (e) {
@@ -210,14 +215,7 @@
             startRefreshTimer();
         });
 
-        // Walk time
-        dom.walkTime.addEventListener('change', (e) => {
-            const val = Math.max(0, Math.min(30, parseInt(e.target.value) || 0));
-            state.walkTime = val;
-            e.target.value = val;
-            saveState();
-            if (state.activeStationId) showDepartures();
-        });
+        // Walk time - removed (now per-station)
 
         // View mode
         dom.viewSingle.addEventListener('click', () => applyViewMode('single'));
@@ -356,7 +354,7 @@
     // ===== Station Management =====
     function addStation(id, name) {
         if (state.stations.find(s => s.id === id)) return; // Already added
-        state.stations.push({ id, name });
+        state.stations.push({ id, name, walkTime: 0 });
         state.activeStationId = id;
         saveState();
         renderSavedStations();
@@ -394,12 +392,28 @@
         dom.savedStations.innerHTML = state.stations.map(station => `
             <div class="saved-station">
                 <span class="station-info">${escapeHtml(station.name)}</span>
+                <input type="number" class="walk-time-input" data-id="${station.id}" 
+                       min="0" max="30" value="${station.walkTime || 0}" 
+                       title="Fu\u00dfweg (Minuten)" style="width: 50px; text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted);">min</span>
                 <button class="btn-remove" data-id="${station.id}" title="Entfernen">&times;</button>
             </div>
         `).join('');
 
         dom.savedStations.querySelectorAll('.btn-remove').forEach(btn => {
             btn.addEventListener('click', () => removeStation(btn.dataset.id));
+        });
+        dom.savedStations.querySelectorAll('.walk-time-input').forEach(input => {
+            input.addEventListener('change', (e) => {
+                const id = e.target.dataset.id;
+                const val = Math.max(0, Math.min(30, parseInt(e.target.value) || 0));
+                const station = state.stations.find(s => s.id === id);
+                if (station) {
+                    station.walkTime = val;
+                    saveState();
+                    if (state.activeStationId) showDepartures();
+                }
+            });
         });
     }
 
@@ -471,7 +485,8 @@
 
             if (data.departures && data.departures.length > 0) {
                 state.departures = data.departures;
-                const filtered = filterByWalkTime(data.departures);
+                const activeStation = state.stations.find(s => s.id === state.activeStationId);
+                const filtered = filterByWalkTime(data.departures, activeStation ? activeStation.walkTime : 0);
                 renderDepartures(filtered);
                 renderAlerts(data.departures);
             } else {
@@ -507,14 +522,14 @@
         }
     }
 
-    function filterByWalkTime(departures) {
-        if (!state.walkTime || state.walkTime <= 0) return departures;
+    function filterByWalkTime(departures, walkTime) {
+        if (!walkTime || walkTime <= 0) return departures;
         const now = new Date();
         return departures.filter(dep => {
             const when = dep.when ? new Date(dep.when) : (dep.plannedWhen ? new Date(dep.plannedWhen) : null);
             if (!when) return true;
             const diffMin = (when - now) / 60000;
-            return diffMin >= state.walkTime;
+            return diffMin >= walkTime;
         });
     }
 
@@ -645,7 +660,6 @@
         dom.kioskToggle.checked = state.kioskMode;
         dom.ledScrollToggle.checked = state.ledScrollEnabled;
         dom.ledScrollSpeed.value = state.ledScrollSpeed;
-        dom.walkTime.value = state.walkTime;
         dom.viewSingle.classList.toggle('active', state.viewMode === 'single');
         dom.viewSplit.classList.toggle('active', state.viewMode === 'split');
         dom.viewLed.classList.toggle('active', state.viewMode === 'led');
@@ -714,10 +728,10 @@
         }
 
         try {
-            // Fetch from all stations and merge
+            // Fetch from all stations and merge, filtering by per-station walk time
             const fetches = state.stations.map(s =>
                 BvgApi.getDepartures(s.id, state.filters, 30, state.departureCount)
-                    .then(data => data.departures || [])
+                    .then(data => filterByWalkTime(data.departures || [], s.walkTime || 0))
                     .catch(() => [])
             );
             const results = await Promise.all(fetches);
@@ -731,15 +745,12 @@
                 return timeA - timeB;
             });
 
-            // Filter by walk time
-            const reachable = filterByWalkTime(allDepartures);
-
-            if (reachable.length > 0) {
+            if (allDepartures.length > 0) {
                 if (state.ledScrollEnabled) {
-                    LedRenderer.startScroll(reachable, state.ledScrollSpeed);
+                    LedRenderer.startScroll(allDepartures, state.ledScrollSpeed);
                 } else {
                     LedRenderer.stopScroll();
-                    LedRenderer.render(reachable.slice(0, 3));
+                    LedRenderer.render(allDepartures.slice(0, 3));
                 }
             } else {
                 LedRenderer.render([]);
@@ -773,8 +784,10 @@
                 BvgApi.getDepartures(rightStation.id, state.filters, 30, state.departureCount)
             ]);
 
-            renderSplitPane(dom.splitDeparturesLeft, leftData.departures || []);
-            renderSplitPane(dom.splitDeparturesRight, rightData.departures || []);
+            const leftFiltered = filterByWalkTime(leftData.departures || [], leftStation.walkTime || 0);
+            const rightFiltered = filterByWalkTime(rightData.departures || [], rightStation.walkTime || 0);
+            renderSplitPane(dom.splitDeparturesLeft, leftFiltered);
+            renderSplitPane(dom.splitDeparturesRight, rightFiltered);
 
             // Update last refresh time
             const now = new Date();

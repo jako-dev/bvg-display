@@ -9,7 +9,7 @@ const BvgApi = (() => {
     let lastRequestTime = 0;
 
     /**
-     * Rate-limited fetch wrapper
+     * Rate-limited fetch wrapper with timeout
      */
     async function rateLimitedFetch(url) {
         const now = Date.now();
@@ -19,11 +19,26 @@ const BvgApi = (() => {
         }
         lastRequestTime = Date.now();
 
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`API error: ${response.status} ${response.statusText}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+        try {
+            const response = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (!response.ok) {
+                if (response.status === 429) {
+                    throw new Error('API rate limit exceeded. Please wait.');
+                }
+                throw new Error(`API error: ${response.status} ${response.statusText}`);
+            }
+            return response.json();
+        } catch (e) {
+            clearTimeout(timeoutId);
+            if (e.name === 'AbortError') {
+                throw new Error('Request timed out. BVG API may be unavailable.');
+            }
+            throw e;
         }
-        return response.json();
     }
 
     /**

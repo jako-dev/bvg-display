@@ -43,3 +43,12 @@
 
 // ===== EEPROM/Preferences =====
 #define PREFS_NAMESPACE "bvg"
+
+// ===== Firmware / OTA =====
+#define FW_VERSION "1.0.0"
+#define GITHUB_OWNER "jako-dev"
+#define GITHUB_REPO "bvg-display"
+// GitHub API endpoint for latest release
+#define GITHUB_RELEASE_URL "https://api.github.com/repos/" GITHUB_OWNER "/" GITHUB_REPO "/releases/latest"
+// Expected firmware asset filename in the release
+#define FW_ASSET_NAME "bvg-display.bin"
