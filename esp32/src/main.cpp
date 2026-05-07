@@ -72,6 +72,9 @@ bool displaySleeping = false;
 // Brightness
 int brightnessSetting = 80;  // 0-255
 
+// API provider
+String apiHost = BVG_API_HOST_DEFAULT;
+
 // Stale data tracking
 unsigned long lastSuccessfulFetch = 0;  // millis() of last successful API response
 #define STALE_DATA_THRESHOLD 300000     // 5 minutes in ms
@@ -423,7 +426,7 @@ void setupWebServer() {
         String query = request->getParam("q")->value();
         
         HTTPClient http;
-        String url = "https://" + String(BVG_API_HOST) + "/locations?query=" + 
+        String url = "https://" + apiHost + "/locations?query=" + 
                      urlEncode(query) + "&results=5&stops=true&addresses=false&poi=false&pretty=false";
         http.begin(url);
         http.setTimeout(8000);
@@ -521,6 +524,7 @@ void setupWebServer() {
         doc["sleep_start"] = sleepStartHour;
         doc["sleep_end"] = sleepEndHour;
         doc["brightness"] = brightnessSetting;
+        doc["api_host"] = apiHost;
         String response;
         serializeJson(doc, response);
         request->send(200, "application/json", response);
@@ -570,6 +574,15 @@ void setupWebServer() {
             if (val >= 5 && val <= 255) {
                 brightnessSetting = val;
                 matrix->setBrightness8(brightnessSetting);
+                changed = true;
+            }
+        }
+        if (request->hasParam("api_host", true)) {
+            String val = request->getParam("api_host", true)->value();
+            // Only allow known safe hosts
+            if (val == "v6.bvg.transport.rest" || val == "v6.vbb.transport.rest") {
+                apiHost = val;
+                lastFetchTime = 0; // Trigger immediate re-fetch
                 changed = true;
             }
         }
@@ -788,7 +801,7 @@ void fetchDepartures() {
     departureCount = 0;
 
     for (int s = 0; s < stationCount; s++) {
-        String url = "https://" + String(BVG_API_HOST) + "/stops/" + stations[s].id + 
+        String url = "https://" + apiHost + "/stops/" + stations[s].id + 
                      "/departures?duration=" + String(BVG_DEPARTURE_DURATION) + 
                      "&results=" + String(depCountSetting) + "&pretty=false&language=de";
 
@@ -1099,6 +1112,7 @@ void loadSettings() {
     sleepStartHour = prefs.getInt("sleepStart", 22);
     sleepEndHour = prefs.getInt("sleepEnd", 6);
     brightnessSetting = prefs.getInt("brightness", 80);
+    apiHost = prefs.getString("apiHost", BVG_API_HOST_DEFAULT);
     
     for (int i = 0; i < stationCount && i < MAX_STATIONS; i++) {
         stations[i].id = prefs.getString(("st_id_" + String(i)).c_str(), "");
@@ -1122,6 +1136,7 @@ void saveSettings() {
     prefs.putInt("sleepStart", sleepStartHour);
     prefs.putInt("sleepEnd", sleepEndHour);
     prefs.putInt("brightness", brightnessSetting);
+    prefs.putString("apiHost", apiHost);
     
     for (int i = 0; i < stationCount; i++) {
         prefs.putString(("st_id_" + String(i)).c_str(), stations[i].id);

@@ -30,8 +30,8 @@
 #define WIFI_CONNECT_TIMEOUT 15000  // ms
 
 // ===== BVG API =====
-#define BVG_API_HOST "v6.bvg.transport.rest"
-#define BVG_API_PORT 443
+// Default API host (can be changed at runtime)
+#define BVG_API_HOST_DEFAULT "v6.bvg.transport.rest"
 #define BVG_DEPARTURE_DURATION 30  // minutes to look ahead
 #define BVG_MAX_DEPARTURES 30
 #define BVG_REFRESH_INTERVAL 30000  // ms between API calls

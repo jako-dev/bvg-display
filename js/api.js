@@ -1,12 +1,44 @@
 /**
- * BVG API Module
- * Handles all communication with the v6.bvg.transport.rest API
+ * Transport API Module
+ * Handles all communication with the transport.rest API
+ * Supports BVG (Berlin), VBB (Berlin+Brandenburg), DB (all Germany)
  */
 const BvgApi = (() => {
-    const BASE_URL = 'https://v6.bvg.transport.rest';
+    const PROVIDERS = {
+        'v6.bvg.transport.rest': 'BVG (Berlin)',
+        'v6.vbb.transport.rest': 'VBB (Berlin + Brandenburg)'
+    };
+
+    let baseUrl = 'https://v6.bvg.transport.rest';
     const RATE_LIMIT_DELAY = 650; // ms between requests to stay under 100/min
 
     let lastRequestTime = 0;
+
+    /**
+     * Set the API provider host
+     * @param {string} host - e.g. 'v6.db.transport.rest'
+     */
+    function setProvider(host) {
+        if (PROVIDERS[host]) {
+            baseUrl = 'https://' + host;
+        }
+    }
+
+    /**
+     * Get the current provider host
+     * @returns {string}
+     */
+    function getProvider() {
+        return baseUrl.replace('https://', '');
+    }
+
+    /**
+     * Get available providers
+     * @returns {Object} host -> label mapping
+     */
+    function getProviders() {
+        return { ...PROVIDERS };
+    }
 
     /**
      * Rate-limited fetch wrapper with timeout
@@ -56,7 +88,7 @@ const BvgApi = (() => {
             poi: 'false',
             pretty: 'false'
         });
-        const data = await rateLimitedFetch(`${BASE_URL}/locations?${params}`);
+        const data = await rateLimitedFetch(`${baseUrl}/locations?${params}`);
         return data.filter(item => item.type === 'stop');
     }
 
@@ -86,7 +118,7 @@ const BvgApi = (() => {
         if (filters.express !== undefined) params.set('express', String(filters.express));
         if (filters.regional !== undefined) params.set('regional', String(filters.regional));
 
-        const data = await rateLimitedFetch(`${BASE_URL}/stops/${encodeURIComponent(stationId)}/departures?${params}`);
+        const data = await rateLimitedFetch(`${baseUrl}/stops/${encodeURIComponent(stationId)}/departures?${params}`);
         return data;
     }
 
@@ -100,12 +132,15 @@ const BvgApi = (() => {
             linesOfStops: 'true',
             pretty: 'false'
         });
-        return rateLimitedFetch(`${BASE_URL}/stops/${encodeURIComponent(stationId)}?${params}`);
+        return rateLimitedFetch(`${baseUrl}/stops/${encodeURIComponent(stationId)}?${params}`);
     }
 
     return {
         searchStations,
         getDepartures,
-        getStation
+        getStation,
+        setProvider,
+        getProvider,
+        getProviders
     };
 })();

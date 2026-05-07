@@ -141,6 +141,11 @@ String getPortalHTML() {
         <!-- Display Settings -->
         <div class="card">
             <h2>Anzeige</h2>
+            <label for="api-provider">Datenquelle</label>
+            <select id="api-provider" onchange="saveSetting('api_host', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
+                <option value="v6.bvg.transport.rest">BVG (Berlin)</option>
+                <option value="v6.vbb.transport.rest">VBB (Berlin + Brandenburg)</option>
+            </select>
             <label for="dep-count">Anzahl Abfahrten</label>
             <select id="dep-count" onchange="saveSetting('dep_count', this.value)" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;margin-bottom:12px;">
                 <option value="3">3</option>
@@ -458,6 +463,10 @@ String getPortalHTML() {
             if (data.brightness) {
                 document.getElementById('brightness').value = data.brightness;
                 document.getElementById('brightness-val').textContent = data.brightness;
+            }
+            // API provider
+            if (data.api_host) {
+                document.getElementById('api-provider').value = data.api_host;
             }
             // Sleep settings
             document.getElementById('sleep-enabled').checked = !!data.sleep_enabled;

@@ -17,6 +17,7 @@
         kioskMode: false,
         ledScrollEnabled: true, // Scroll through departures in LED mode
         ledScrollSpeed: 3000,   // ms between scroll steps
+        apiProvider: 'v6.bvg.transport.rest',  // API host
         filters: {
             suburban: true,
             subway: true,
@@ -46,6 +47,7 @@
         lastUpdate: document.getElementById('last-update'),
         realtimeIndicator: document.getElementById('realtime-indicator'),
         alertsBanner: document.getElementById('alerts-banner'),
+        apiProviderSelect: document.getElementById('api-provider'),
         departureCountSelect: document.getElementById('departure-count'),
         refreshIntervalInput: document.getElementById('refresh-interval'),
         themeDark: document.getElementById('theme-dark'),
@@ -123,7 +125,9 @@
                 state.kioskMode = parsed.kioskMode || false;
                 state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
                 state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
+                state.apiProvider = parsed.apiProvider || 'v6.bvg.transport.rest';
                 state.filters = { ...state.filters, ...parsed.filters };
+                BvgApi.setProvider(state.apiProvider);
             }
         } catch (e) {
             console.warn('Failed to load saved state:', e);
@@ -142,6 +146,7 @@
                 kioskMode: state.kioskMode,
                 ledScrollEnabled: state.ledScrollEnabled,
                 ledScrollSpeed: state.ledScrollSpeed,
+                apiProvider: state.apiProvider,
                 filters: state.filters
             }));
         } catch (e) {
@@ -198,6 +203,14 @@
         // Theme
         dom.themeDark.addEventListener('click', () => applyTheme('dark'));
         dom.themeModern.addEventListener('click', () => applyTheme('modern'));
+
+        // API provider
+        dom.apiProviderSelect.addEventListener('change', (e) => {
+            state.apiProvider = e.target.value;
+            BvgApi.setProvider(state.apiProvider);
+            saveState();
+            if (state.activeStationId) showDepartures();
+        });
 
         // Departure count
         dom.departureCountSelect.addEventListener('change', (e) => {
@@ -657,6 +670,7 @@
         });
         dom.departureCountSelect.value = state.departureCount;
         dom.refreshIntervalInput.value = state.refreshInterval;
+        dom.apiProviderSelect.value = state.apiProvider;
         dom.kioskToggle.checked = state.kioskMode;
         dom.ledScrollToggle.checked = state.ledScrollEnabled;
         dom.ledScrollSpeed.value = state.ledScrollSpeed;

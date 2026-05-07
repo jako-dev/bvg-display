@@ -117,6 +117,14 @@
 
                 <!-- Number of Departures -->
                 <div class="setting-group">
+                    <label for="api-provider">Datenquelle</label>
+                    <select id="api-provider">
+                        <option value="v6.bvg.transport.rest">BVG (Berlin)</option>
+                        <option value="v6.vbb.transport.rest">VBB (Berlin + Brandenburg)</option>
+                    </select>
+                </div>
+
+                <div class="setting-group">
                     <label for="departure-count">Anzahl Abfahrten</label>
                     <select id="departure-count">
                         <option value="1">1</option>
