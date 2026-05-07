@@ -1,86 +1,80 @@
 # BVG Abfahrtsmonitor
 
-A real-time departure display for Berlin public transport (BVG/VBB), inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic).
+A real-time departure display for Berlin public transport (BVG/VBB), available as a **web app**, an **ESP32 LED matrix display**, and a **Home Assistant integration**.
 
-## Quick Start
+Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic).
 
-```bash
-cd bvg-display
-python3 -m http.server 8080
-```
+**[Live Demo →](https://jako-dev.github.io/bvg-display/)**
 
-Then open **http://localhost:8080** in your browser.
-
-Alternatively, just open `index.html` directly in your browser (works thanks to CORS-enabled BVG API).
-
-## Features
-
-- **Real-time departures** from any BVG/VBB station in Berlin & Brandenburg
-- **Station search** — find and save multiple stations
-- **Transport type filters** — show/hide S-Bahn, U-Bahn, Tram, Bus, Ferry, IC/ICE, Regional
-- **Delay highlighting** — delays shown in red, on-time in green, cancelled struck through
-- **Service alerts** — disruption warnings displayed as banner
-- **Platform info** — shows platform/position when available
-- **Two visual themes**:
-  - Classic Dark (authentic BVG/DB departure board look)
-  - Modern Minimal (Catppuccin-inspired dark theme)
-- **Auto-refresh** — configurable interval (10–120 seconds)
-- **Persistent settings** — stations and preferences saved in localStorage
-
-## Usage
-
-1. Click the ⚙ gear icon to open settings
-2. Search for a station (e.g. "Alexanderplatz", "Kottbusser Tor")
-3. Click a result to add it
-4. Departures will load automatically
-5. Add multiple stations and switch between them via tabs
-
-## Architecture
-
-```
-bvg-display/
-├── index.html          # Main page
-├── css/
-│   └── styles.css      # Themes & layout
-├── js/
-│   ├── api.js          # BVG REST API wrapper
-│   ├── app.js          # Application logic & UI
-│   └── led-renderer.js # Canvas LED panel emulator
-└── esp32/
-    ├── platformio.ini  # PlatformIO project config
-    └── src/
-        ├── main.cpp    # Firmware entry point
-        ├── config.h    # Pin mappings & constants
-        ├── font.h      # 4x7 bitmap font
-        └── web_portal.h # Embedded config web UI
-```
-
-## API
-
-Uses the public [v6.bvg.transport.rest](https://v6.bvg.transport.rest/) API:
-- No API key required
-- Rate limit: 100 requests/minute
-- CORS enabled (works directly from browser)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
-## ESP32 Hardware Version
+## Overview
 
-The `esp32/` directory contains firmware for running the departure display on real LED matrix hardware.
+| Platform | Description |
+|----------|-------------|
+| **Web App** | Browser-based departure monitor — works on any device |
+| **ESP32 Firmware** | Physical HUB75 LED matrix display (128×32) with WiFi config portal |
+
+---
+
+## Web App
+
+### Features
+
+- **Real-time departures** from any BVG/VBB station
+- **Multi-station** support with tabs
+- **Per-station walk time** — hides departures you can't reach in time
+- **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
+- **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
+- **Service alerts** — disruption banners
+- **Views**: Single, Split (two stations side-by-side), LED emulator
+- **Themes**: Classic Dark, Modern (Catppuccin)
+- **Kiosk mode** — fullscreen for wall-mounted tablets
+- **Auto-refresh** — configurable interval (10–120s)
+- **Data source selector** — BVG or VBB
+- **Offline-capable** — all settings persisted in localStorage
+
+### Quick Start
+
+Open the [live version](https://jako-dev.github.io/bvg-display/) or run locally:
+
+```bash
+python3 -m http.server 8080
+# Open http://localhost:8080
+```
+
+---
+
+## ESP32 Hardware Display
+
+The `esp32/` directory contains firmware for a physical departure display using HUB75 RGB LED matrix panels.
+
+### Features
+
+- **128×32 pixel RGB LED display** (2× 64×32 HUB75 panels)
+- **WiFi captive portal** for zero-config setup (no coding required)
+- **Multi-station** with per-station walk time filtering
+- **OTA firmware updates** via GitHub Releases (one-click from web UI)
+- **Automatic rollback** — if a firmware update breaks WiFi, auto-reverts to last known good
+- **Night mode** — scheduled display off (e.g. 22:00–06:00)
+- **Adjustable brightness**
+- **mDNS** — accessible at `http://bvg-display.local`
+- **Watchdog** — auto-reboot on hang
+- **Factory reset** — via web UI or hold BOOT button 5 seconds
+- **Stale data indicator** — blinking red dot when API hasn't responded in >5 min
 
 ### Components
 
-| Component | Description | Notes |
-|-----------|-------------|-------|
-| ESP32 DevKit V1 (30-pin) | Microcontroller | Any ESP32-WROOM-32 board works |
-| HUB75 LED Matrix Panel 64×32 | RGB LED panel (P3 or P4 pitch) | ×2 panels chained for 128×32 |
-| 5V Power Supply (≥4A) | Panel power | Each 64×32 panel draws up to 2A at full white |
-| Jumper wires / ribbon cable | HUB75 connection | Female-to-female dupont or IDC ribbon |
-| USB cable (micro-USB or USB-C) | For flashing & serial | Depends on your ESP32 board |
+| Component | Description |
+|-----------|-------------|
+| ESP32 DevKit V1 (30-pin) | Any ESP32-WROOM-32 board |
+| HUB75 LED Matrix 64×32 (×2) | P3 or P4 pitch, chained for 128×32 |
+| 5V Power Supply (≥4A) | Each panel draws up to 2A at full white |
+| Jumper wires / IDC ribbon | HUB75 connection |
 
-### Wiring Diagram
-
-Connect the ESP32 to the **input** HUB75 connector on the first panel. Chain the second panel via the output connector of the first.
+### Wiring
 
 ```
 ESP32 Pin    HUB75 Signal    HUB75 Pin
@@ -103,84 +97,105 @@ GPIO 15  ──► OE              15
 GND      ──► GND             16
 ```
 
-> **Note:** Pin E is unused (`-1`) for standard 32-row panels. If using a 64-row panel, assign E to a free GPIO in `config.h`.
-
-**Power wiring:**
-- Connect the 5V PSU directly to the panel's power terminals (the screw terminals or power connector on the panel PCB).
-- Connect ESP32 `VIN` to 5V and `GND` to the shared ground.
-- **Do not power the panels from the ESP32's 5V pin** — the panels draw too much current.
-
+**Power:**
 ```
 5V PSU ─────┬──► Panel 1 (5V / GND)
             ├──► Panel 2 (5V / GND)
             └──► ESP32 VIN / GND
 ```
 
-### Prerequisites
+> Do not power panels from the ESP32's 5V pin.
 
-1. **PlatformIO** — Install via VS Code extension ("PlatformIO IDE") or CLI:
-   ```bash
-   pip install platformio
-   ```
-
-2. **USB driver** — Install the CP2102 or CH340 driver if your OS doesn't recognize the ESP32 board.
-
-### Flashing the Firmware
+### Flashing
 
 ```bash
 cd esp32
-
-# Build the firmware
-pio run
-
-# Upload to the ESP32 (connect via USB first)
 pio run --target upload
-
-# (Optional) Monitor serial output
 pio device monitor --baud 115200
-```
-
-Or as a single command:
-```bash
-cd esp32 && pio run --target upload && pio device monitor --baud 115200
 ```
 
 ### First-Time Setup
 
-1. After flashing, the ESP32 creates a WiFi access point named **"BVG-Display"** (open, no password).
-2. Connect to it with your phone or laptop.
-3. A captive portal opens automatically (or navigate to `192.168.4.1`).
-4. Enter your home WiFi credentials and click **Verbinden**.
-5. Once connected, the portal shows the device's IP on your local network.
-6. Search for a station (e.g. "Alexanderplatz") and add it.
-7. The LED matrix will begin showing departures within seconds.
+1. Power on → ESP32 creates WiFi AP **"BVG-Display"** (open)
+2. Connect with phone/laptop → captive portal opens
+3. Enter WiFi credentials → device connects to your network
+4. Access config at `http://bvg-display.local` or the device IP
+5. Add stations → LED matrix shows departures
 
-After setup, the config portal remains accessible at the device's local IP address.
+### OTA Updates
 
-### Configuration
+When a new [GitHub Release](https://github.com/jako-dev/bvg-display/releases) is published:
+1. Open the device config page
+2. Click "Nach Updates suchen" in the Firmware section
+3. Click "Update installieren"
 
-All settings can be adjusted in `esp32/src/config.h`:
+The device downloads the firmware, flashes it, and reboots. If the update fails to connect to WiFi, it automatically rolls back.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `PANEL_WIDTH` | 64 | Width of a single panel |
-| `PANELS_NUMBER` | 2 | Number of chained panels |
-| `BVG_REFRESH_INTERVAL` | 30000 | API poll interval (ms) |
-| `BVG_DEPARTURE_DURATION` | 30 | Minutes to look ahead |
-| `MAX_STATIONS` | 5 | Max saved stations |
-| `SCROLL_SPEED` | 50 | Scroll step interval (ms) |
+You can also manually upload a `.bin` file via the web UI.
 
-Departure count is configurable at runtime via the web portal (3–15).
+### Configuration (Web Portal)
 
-### Troubleshooting
+All runtime settings are adjustable from the config page — no reflashing needed:
+
+| Setting | Description |
+|---------|-------------|
+| Stations | Add/remove, per-station walk time |
+| Data source | BVG or VBB |
+| Departures count | 3–15 |
+| Scroll | Enable/disable, speed |
+| Brightness | 5–255 |
+| Night mode | Scheduled display off |
+| Firmware update | GitHub OTA or manual upload |
+| Factory reset | Wipe all settings |
+
+---
+
+## Project Structure
+
+```
+bvg-display/
+├── index.html              # Web app entry
+├── css/styles.css          # Themes & layout
+├── js/
+│   ├── api.js              # Transport REST API wrapper
+│   ├── app.js              # Application logic
+│   └── led-renderer.js     # Canvas LED panel emulator
+├── esp32/
+│   ├── platformio.ini      # PlatformIO config
+│   └── src/
+│       ├── main.cpp        # Firmware (WiFi, API, LED, web server, OTA)
+│       ├── config.h        # Pin mappings & constants
+│       ├── font.h          # 4×7 bitmap font
+│       └── web_portal.h    # Embedded config web UI
+└── .github/
+    └── workflows/
+        └── build-firmware.yml  # CI: build & attach .bin to releases
+```
+
+## API
+
+Uses the public [transport.rest](https://transport.rest/) APIs:
+
+| Endpoint | Coverage |
+|----------|----------|
+| `v6.bvg.transport.rest` | Berlin (BVG) |
+| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) |
+
+- No API key required
+- Rate limit: ~100 requests/minute
+- CORS enabled (browser-friendly)
+
+## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| Panel stays dark | Check 5V power to panel; verify GND is shared with ESP32 |
-| Garbled/flickering display | Double-check all HUB75 wiring; ensure no loose jumper wires |
-| Can't find "BVG-Display" AP | Re-flash; hold BOOT button during upload if needed |
-| Upload fails | Hold BOOT button on ESP32 when upload starts; try lower `upload_speed` in `platformio.ini` |
-| No departures shown | Check serial monitor for WiFi/API errors; BVG API may be temporarily down (503) |
+| Panel stays dark | Check 5V power; verify shared GND with ESP32 |
+| Garbled display | Recheck HUB75 wiring, no loose jumpers |
+| Can't find "BVG-Display" AP | Reflash; hold BOOT during upload |
+| Upload fails | Hold BOOT when upload starts; lower `upload_speed` |
+| No departures | Check serial monitor; BVG API may be temporarily down |
+| Blinking red dot | API stale >5 min — check WiFi and internet connectivity |
+| OTA failed | Device keeps old firmware; retry or use manual .bin upload |
 
 ## License
 
