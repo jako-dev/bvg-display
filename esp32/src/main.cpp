@@ -17,6 +17,7 @@
 #include <ArduinoJson.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 
 #include "config.h"
 #include "font.h"
@@ -95,11 +96,24 @@ void setup() {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        // Start AP mode for configuration
+        // Check if this is an OTA update that can't connect — rollback
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t ota_state;
+        if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+            if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+                Serial.println("[OTA] WiFi failed after update — rolling back!");
+                esp_ota_mark_app_invalid_rollback_and_reboot();
+                // Does not return
+            }
+        }
+        // Normal case: start AP mode for configuration
         appMode = MODE_AP_SETUP;
         setupAP();
     } else {
         appMode = MODE_RUNNING;
+        // Mark firmware as valid (confirms OTA if pending)
+        esp_ota_mark_app_valid_cancel_rollback();
+        Serial.println("[OTA] Firmware confirmed valid");
         syncNTP();
     }
 
