@@ -162,17 +162,59 @@ String getPortalHTML() {
                 <option value="5000">5s</option>
                 <option value="8000">8s (Langsam)</option>
             </select>
+            <label for="brightness">Helligkeit</label>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                <input type="range" id="brightness" min="5" max="255" value="80" oninput="document.getElementById('brightness-val').textContent=this.value" onchange="saveSetting('brightness', this.value)" style="flex:1;accent-color:#ffcc00;">
+                <span id="brightness-val" style="font-size:0.85rem;color:#89b4fa;min-width:28px;text-align:right;">80</span>
+            </div>
             <p style="font-size:0.75rem;color:#888;margin-top:4px;">Wenn Scrollen deaktiviert ist, werden nur die naechsten 3 Abfahrten angezeigt.</p>
             <div id="display-msg"></div>
+        </div>
+
+        <!-- Sleep Mode -->
+        <div class="card">
+            <h2>Nachtmodus</h2>
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;">
+                <input type="checkbox" id="sleep-enabled" onchange="saveSleepSettings()" style="width:18px;height:18px;accent-color:#ffcc00;">
+                <span style="font-size:0.9rem;">Nachtmodus aktiviert</span>
+            </label>
+            <div id="sleep-times" style="display:flex;gap:12px;align-items:center;margin-bottom:12px;">
+                <div style="flex:1;">
+                    <label for="sleep-start" style="font-size:0.8rem;color:#888;">Von</label>
+                    <select id="sleep-start" onchange="saveSleepSettings()" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;">
+                    </select>
+                </div>
+                <span style="color:#888;margin-top:16px;">—</span>
+                <div style="flex:1;">
+                    <label for="sleep-end" style="font-size:0.8rem;color:#888;">Bis</label>
+                    <select id="sleep-end" onchange="saveSleepSettings()" style="width:100%;padding:10px 14px;border:1px solid #2a2a4a;border-radius:8px;background:#0f3460;color:#eee;font-size:0.95rem;">
+                    </select>
+                </div>
+            </div>
+            <p style="font-size:0.75rem;color:#888;">Display und Datenabfrage werden im angegebenen Zeitraum pausiert. Der Webserver bleibt erreichbar.</p>
+            <div id="sleep-msg"></div>
         </div>
 
         <!-- Info -->
         <div class="card">
             <h2>Info</h2>
-            <p style="font-size:0.8rem; color:#888;">
-                Nach der WLAN-Einrichtung ist dieses Interface unter der IP-Adresse des Geraets erreichbar.
+            <p style="font-size:0.8rem; color:#888; margin-bottom:8px;">
+                Dieses Interface ist erreichbar unter <strong id="info-hostname">bvg-display.local</strong> oder der IP-Adresse.
                 Die LED-Anzeige aktualisiert sich automatisch alle 30 Sekunden.
             </p>
+            <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#888;margin-bottom:4px;">
+                <span>Betriebszeit:</span><span id="info-uptime">—</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#888;margin-bottom:4px;">
+                <span>Freier Speicher:</span><span id="info-heap">—</span>
+            </div>
+            <div id="info-stale" class="hidden" style="margin-top:8px;padding:8px 12px;background:#5c2020;border-radius:6px;font-size:0.8rem;color:#ff6666;">
+                ⚠ Daten veraltet — API antwortet nicht seit &gt;5 Minuten
+            </div>
+            <hr style="border-color:#2a2a4a;margin:14px 0;">
+            <button class="btn" onclick="doFactoryReset()" style="width:100%;background:#e74c3c;color:#fff;">Werksreset</button>
+            <p style="font-size:0.7rem;color:#888;margin-top:6px;text-align:center;">Loescht alle Einstellungen. Alternativ: BOOT-Taste 5 Sekunden halten.</p>
+            <div id="reset-msg"></div>
         </div>
 
         <!-- Firmware Update -->
@@ -223,6 +265,21 @@ String getPortalHTML() {
                 text.textContent = 'Nicht verbunden — bitte WLAN einrichten';
             }
             renderStations();
+            // Update info panel
+            if (statusData.uptime_seconds !== undefined) {
+                const h = Math.floor(statusData.uptime_seconds / 3600);
+                const m = Math.floor((statusData.uptime_seconds % 3600) / 60);
+                document.getElementById('info-uptime').textContent = h + 'h ' + m + 'min';
+            }
+            if (statusData.free_heap) {
+                document.getElementById('info-heap').textContent = Math.round(statusData.free_heap / 1024) + ' KB';
+            }
+            const staleEl = document.getElementById('info-stale');
+            if (statusData.data_stale) {
+                staleEl.classList.remove('hidden');
+            } else {
+                staleEl.classList.add('hidden');
+            }
         } catch(e) {
             document.getElementById('status-text').textContent = 'Fehler beim Laden';
         }
@@ -397,13 +454,78 @@ String getPortalHTML() {
             if (data.scroll_speed) {
                 document.getElementById('scroll-speed').value = data.scroll_speed;
             }
+            // Brightness
+            if (data.brightness) {
+                document.getElementById('brightness').value = data.brightness;
+                document.getElementById('brightness-val').textContent = data.brightness;
+            }
+            // Sleep settings
+            document.getElementById('sleep-enabled').checked = !!data.sleep_enabled;
+            if (data.sleep_start !== undefined) {
+                document.getElementById('sleep-start').value = data.sleep_start;
+            }
+            if (data.sleep_end !== undefined) {
+                document.getElementById('sleep-end').value = data.sleep_end;
+            }
         } catch(e) {}
     }
 
+    function initSleepSelects() {
+        const startSel = document.getElementById('sleep-start');
+        const endSel = document.getElementById('sleep-end');
+        for (let h = 0; h < 24; h++) {
+            const label = String(h).padStart(2, '0') + ':00';
+            startSel.innerHTML += '<option value="' + h + '">' + label + '</option>';
+            endSel.innerHTML += '<option value="' + h + '">' + label + '</option>';
+        }
+        startSel.value = 22;
+        endSel.value = 6;
+    }
+
+    async function saveSleepSettings() {
+        const enabled = document.getElementById('sleep-enabled').checked ? '1' : '0';
+        const start = document.getElementById('sleep-start').value;
+        const end = document.getElementById('sleep-end').value;
+        const msgEl = document.getElementById('sleep-msg');
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'sleep_enabled=' + enabled + '&sleep_start=' + start + '&sleep_end=' + end
+            });
+            const data = await res.json();
+            if (data.ok) {
+                msgEl.innerHTML = '<div class="msg msg-success">Gespeichert</div>';
+            } else {
+                msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+            }
+            setTimeout(() => msgEl.innerHTML = '', 2000);
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+        }
+    }
+
+    async function doFactoryReset() {
+        if (!confirm('Alle Einstellungen werden geloescht und das Geraet startet im Setup-Modus neu. Fortfahren?')) return;
+        const msgEl = document.getElementById('reset-msg');
+        try {
+            const r = await fetch('/api/factory-reset', { method: 'POST' });
+            const data = await r.json();
+            msgEl.innerHTML = '<div class="msg msg-success">' + data.msg + '</div>';
+            setTimeout(() => { location.reload(); }, 5000);
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+        }
+    }
+
     // Init
+    initSleepSelects();
     loadStatus();
     loadSettings();
     loadFirmwareVersion();
+
+    // Refresh status every 30s
+    setInterval(loadStatus, 30000);
 
     async function loadFirmwareVersion() {
         try {

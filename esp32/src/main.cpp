@@ -18,6 +18,8 @@
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
+#include <ESPmDNS.h>
 
 #include "config.h"
 #include "font.h"
@@ -60,6 +62,24 @@ int scrollSpeedSetting = 3000;    // ms between scroll steps
 String wifiSSID = "";
 String wifiPassword = "";
 unsigned long lastFetchTime = 0;
+
+// Sleep mode
+bool sleepEnabled = false;
+int sleepStartHour = 22;  // 0-23
+int sleepEndHour = 6;     // 0-23
+bool displaySleeping = false;
+
+// Brightness
+int brightnessSetting = 80;  // 0-255
+
+// Stale data tracking
+unsigned long lastSuccessfulFetch = 0;  // millis() of last successful API response
+#define STALE_DATA_THRESHOLD 300000     // 5 minutes in ms
+
+// Factory reset button
+#define RESET_BUTTON_PIN 0  // BOOT button on most ESP32 dev boards
+#define RESET_HOLD_TIME 5000  // Hold 5 seconds to factory reset
+
 unsigned long lastScrollTime = 0;
 unsigned long lastWifiCheck = 0;
 int scrollOffset = 0;
@@ -77,8 +97,10 @@ void parseDeparturesAppend(const String& json);
 void sortDepartures();
 void renderDisplay();
 void renderSetupScreen();
+void renderTextCentered(const char* text, uint16_t color);
 void loadSettings();
 void saveSettings();
+void factoryReset();
 uint16_t getLineColor(const String& product, const String& lineName);
 
 // ===== Setup =====
@@ -86,8 +108,12 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\n=== BVG Display Starting ===");
 
+    // Factory reset button (BOOT pin)
+    pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
     setupMatrix();
     loadSettings();
+    matrix->setBrightness8(brightnessSetting);
 
     if (wifiSSID.length() > 0) {
         // Try connecting to saved WiFi
@@ -115,14 +141,39 @@ void setup() {
         esp_ota_mark_app_valid_cancel_rollback();
         Serial.println("[OTA] Firmware confirmed valid");
         syncNTP();
+
+        // Start mDNS
+        if (MDNS.begin("bvg-display")) {
+            MDNS.addService("http", "tcp", 80);
+            Serial.println("[mDNS] http://bvg-display.local");
+        }
     }
 
     setupWebServer();
+
+    // Enable hardware watchdog (60 second timeout)
+    esp_task_wdt_init(60, true);
+    esp_task_wdt_add(NULL);
+
     Serial.println("Setup complete. Mode: " + String(appMode == MODE_AP_SETUP ? "AP Setup" : "Running"));
 }
 
 // ===== Loop =====
 void loop() {
+    // Feed watchdog
+    esp_task_wdt_reset();
+
+    // Check factory reset button (BOOT button held for 5 seconds)
+    static unsigned long resetBtnStart = 0;
+    if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+        if (resetBtnStart == 0) resetBtnStart = millis();
+        if (millis() - resetBtnStart >= RESET_HOLD_TIME) {
+            factoryReset();
+        }
+    } else {
+        resetBtnStart = 0;
+    }
+
     if (appMode == MODE_AP_SETUP) {
         dnsServer.processNextRequest();
         renderSetupScreen();
@@ -137,6 +188,40 @@ void loop() {
     if (now - lastWifiCheck >= 30000) {
         checkWiFiReconnect();
         lastWifiCheck = now;
+    }
+
+    // Check sleep mode
+    if (sleepEnabled && ntpSynced) {
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo)) {
+            int h = timeinfo.tm_hour;
+            bool shouldSleep;
+            if (sleepStartHour <= sleepEndHour) {
+                // e.g. 8-17 (sleep during the day)
+                shouldSleep = (h >= sleepStartHour && h < sleepEndHour);
+            } else {
+                // e.g. 22-6 (sleep overnight, typical)
+                shouldSleep = (h >= sleepStartHour || h < sleepEndHour);
+            }
+            if (shouldSleep && !displaySleeping) {
+                displaySleeping = true;
+                matrix->clearScreen();
+                Serial.println("[Sleep] Display off");
+            } else if (!shouldSleep && displaySleeping) {
+                displaySleeping = false;
+                lastFetchTime = 0; // Trigger immediate refresh on wake
+                Serial.println("[Sleep] Display on");
+            }
+        }
+    } else if (!sleepEnabled && displaySleeping) {
+        displaySleeping = false;
+        lastFetchTime = 0;
+    }
+
+    // Skip fetch and render while sleeping
+    if (displaySleeping) {
+        delay(1000);
+        return;
     }
 
     // Fetch departures periodically
@@ -180,7 +265,7 @@ void setupMatrix() {
 
     matrix = new MatrixPanel_I2S_DMA(mxconfig);
     matrix->begin();
-    matrix->setBrightness8(80);
+    matrix->setBrightness8(80);  // Default, overridden after loadSettings()
     matrix->clearScreen();
 }
 
@@ -274,8 +359,12 @@ void setupWebServer() {
         doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
         doc["wifi_ssid"] = wifiSSID;
         doc["ip"] = WiFi.localIP().toString();
+        doc["hostname"] = "bvg-display.local";
         doc["station_count"] = stationCount;
         doc["departure_count"] = departureCount;
+        doc["uptime_seconds"] = millis() / 1000;
+        doc["data_stale"] = (lastSuccessfulFetch > 0 && millis() - lastSuccessfulFetch > STALE_DATA_THRESHOLD);
+        doc["free_heap"] = ESP.getFreeHeap();
         
         JsonArray stArr = doc["stations"].to<JsonArray>();
         for (int i = 0; i < stationCount; i++) {
@@ -428,6 +517,10 @@ void setupWebServer() {
         doc["dep_count"] = depCountSetting;
         doc["scroll_enabled"] = scrollEnabled;
         doc["scroll_speed"] = scrollSpeedSetting;
+        doc["sleep_enabled"] = sleepEnabled;
+        doc["sleep_start"] = sleepStartHour;
+        doc["sleep_end"] = sleepEndHour;
+        doc["brightness"] = brightnessSetting;
         String response;
         serializeJson(doc, response);
         request->send(200, "application/json", response);
@@ -454,12 +547,45 @@ void setupWebServer() {
                 changed = true;
             }
         }
+        if (request->hasParam("sleep_enabled", true)) {
+            sleepEnabled = request->getParam("sleep_enabled", true)->value() == "1";
+            changed = true;
+        }
+        if (request->hasParam("sleep_start", true)) {
+            int val = request->getParam("sleep_start", true)->value().toInt();
+            if (val >= 0 && val <= 23) {
+                sleepStartHour = val;
+                changed = true;
+            }
+        }
+        if (request->hasParam("sleep_end", true)) {
+            int val = request->getParam("sleep_end", true)->value().toInt();
+            if (val >= 0 && val <= 23) {
+                sleepEndHour = val;
+                changed = true;
+            }
+        }
+        if (request->hasParam("brightness", true)) {
+            int val = request->getParam("brightness", true)->value().toInt();
+            if (val >= 5 && val <= 255) {
+                brightnessSetting = val;
+                matrix->setBrightness8(brightnessSetting);
+                changed = true;
+            }
+        }
         if (changed) {
             saveSettings();
             request->send(200, "application/json", "{\"ok\":true}");
         } else {
             request->send(400, "application/json", "{\"ok\":false,\"msg\":\"No valid params\"}");
         }
+    });
+
+    // API: Factory reset
+    server.on("/api/factory-reset", HTTP_POST, [](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Factory reset. Rebooting...\"}");
+        delay(500);
+        factoryReset();
     });
 
     // API: Check for firmware update (GitHub releases)
@@ -702,6 +828,9 @@ void fetchDepartures() {
     // Sort merged departures by minutesUntil
     sortDepartures();
     scrollOffset = 0;
+    if (departureCount > 0) {
+        lastSuccessfulFetch = millis();
+    }
     Serial.println("Total merged departures: " + String(departureCount));
 }
 
@@ -805,6 +934,15 @@ void renderDisplay() {
     if (departureCount == 0) {
         renderTextCentered("Warte auf Daten...", matrix->color565(255, 204, 0));
         return;
+    }
+
+    // Stale data warning: blinking dot in top-right corner
+    bool dataStale = (lastSuccessfulFetch > 0 && millis() - lastSuccessfulFetch > STALE_DATA_THRESHOLD);
+    if (dataStale) {
+        // Blink a red dot every 500ms
+        if ((millis() / 500) % 2 == 0) {
+            matrix->fillRect(MATRIX_WIDTH - 3, 0, 3, 3, matrix->color565(255, 0, 0));
+        }
     }
 
     // Render up to DISPLAY_ROWS departures
@@ -957,6 +1095,10 @@ void loadSettings() {
     depCountSetting = prefs.getInt("depCount", 6);
     scrollEnabled = prefs.getBool("scrollOn", false);
     scrollSpeedSetting = prefs.getInt("scrollSpd", 3000);
+    sleepEnabled = prefs.getBool("sleepOn", false);
+    sleepStartHour = prefs.getInt("sleepStart", 22);
+    sleepEndHour = prefs.getInt("sleepEnd", 6);
+    brightnessSetting = prefs.getInt("brightness", 80);
     
     for (int i = 0; i < stationCount && i < MAX_STATIONS; i++) {
         stations[i].id = prefs.getString(("st_id_" + String(i)).c_str(), "");
@@ -976,6 +1118,10 @@ void saveSettings() {
     prefs.putInt("depCount", depCountSetting);
     prefs.putBool("scrollOn", scrollEnabled);
     prefs.putInt("scrollSpd", scrollSpeedSetting);
+    prefs.putBool("sleepOn", sleepEnabled);
+    prefs.putInt("sleepStart", sleepStartHour);
+    prefs.putInt("sleepEnd", sleepEndHour);
+    prefs.putInt("brightness", brightnessSetting);
     
     for (int i = 0; i < stationCount; i++) {
         prefs.putString(("st_id_" + String(i)).c_str(), stations[i].id);
@@ -983,6 +1129,18 @@ void saveSettings() {
         prefs.putInt(("st_wt_" + String(i)).c_str(), stations[i].walkTime);
     }
     prefs.end();
+}
+
+void factoryReset() {
+    Serial.println("[RESET] Factory reset triggered!");
+    matrix->clearScreen();
+    renderTextCentered("RESET...", matrix->color565(255, 0, 0));
+    delay(1000);
+    prefs.begin(PREFS_NAMESPACE, false);
+    prefs.clear();
+    prefs.end();
+    delay(500);
+    ESP.restart();
 }
 
 // ===== Utility =====
