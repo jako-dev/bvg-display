@@ -7,7 +7,9 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#1a1a1a">
     <title>BVG Abfahrtsmonitor</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23000'/><text y='24' x='16' text-anchor='middle' font-size='22' font-family='monospace' fill='%23fc0'>B</text></svg>">
+    <link rel="icon" href="icons/icon-192.png" type="image/png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -88,6 +90,14 @@
                     </div>
                     <p class="setting-hint" id="split-hint">Split-View zeigt zwei Stationen nebeneinander (mind. 2 Stationen nötig).</p>
                     <p class="setting-hint" id="led-hint">LED-Panel emuliert eine 128&times;32 HUB75/P10 LED-Matrix.</p>
+                </div>
+
+                <!-- Split View Station Selection -->
+                <div class="setting-group">
+                    <label for="split-left-select">Split-View: Linke Station</label>
+                    <select id="split-left-select"></select>
+                    <label for="split-right-select">Split-View: Rechte Station</label>
+                    <select id="split-right-select"></select>
                 </div>
 
                 <!-- LED Scroll Settings -->

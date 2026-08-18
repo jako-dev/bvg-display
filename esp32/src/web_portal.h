@@ -175,6 +175,36 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
             <div id="display-msg"></div>
         </div>
 
+        <!-- Transport Filters -->
+        <div class="card">
+            <h2>Verkehrsmittel</h2>
+            <div id="filter-toggles" style="display:flex;flex-wrap:wrap;gap:8px;">
+                <label class="filter-toggle" data-filter="suburban" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> S-Bahn
+                </label>
+                <label class="filter-toggle" data-filter="subway" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> U-Bahn
+                </label>
+                <label class="filter-toggle" data-filter="tram" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> Tram
+                </label>
+                <label class="filter-toggle" data-filter="bus" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> Bus
+                </label>
+                <label class="filter-toggle" data-filter="ferry" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> Faehre
+                </label>
+                <label class="filter-toggle" data-filter="express" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> IC/ICE
+                </label>
+                <label class="filter-toggle" data-filter="regional" style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#0f3460;border-radius:8px;cursor:pointer;font-size:0.85rem;">
+                    <input type="checkbox" checked style="width:16px;height:16px;accent-color:#ffcc00;"> Regional
+                </label>
+            </div>
+            <p style="font-size:0.75rem;color:#888;margin-top:8px;">Nicht ausgewaehlte Verkehrsmittel werden auf dem LED-Panel ausgeblendet.</p>
+            <div id="filter-msg"></div>
+        </div>
+
         <!-- Sleep Mode -->
         <div class="card">
             <h2>Nachtmodus</h2>
@@ -197,6 +227,27 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
             </div>
             <p style="font-size:0.75rem;color:#888;">Display und Datenabfrage werden im angegebenen Zeitraum pausiert. Der Webserver bleibt erreichbar.</p>
             <div id="sleep-msg"></div>
+        </div>
+
+        <!-- Security -->
+        <div class="card">
+            <h2>Sicherheit</h2>
+            <p style="font-size:0.8rem;color:#888;margin-bottom:12px;">
+                Ohne Passwortschutz kann jeder im selben Netzwerk diese Seite oeffnen und Einstellungen aendern.
+                Aktivieren, um einen Benutzernamen/Passwort-Schutz (Basic Auth) fuer diese Seite zu verlangen.
+            </p>
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;">
+                <input type="checkbox" id="auth-enabled" style="width:18px;height:18px;accent-color:#ffcc00;">
+                <span style="font-size:0.9rem;">Passwortschutz aktiviert</span>
+            </label>
+            <label for="auth-password">Passwort <span style="color:#888;font-weight:normal;">(Benutzername: admin)</span></label>
+            <input type="password" id="auth-password" placeholder="Neues Passwort setzen" autocomplete="new-password">
+            <button class="btn-secondary btn-small" onclick="saveSecuritySettings()">Speichern</button>
+            <p style="font-size:0.7rem;color:#888;margin-top:8px;">
+                Nach dem Aktivieren fragt der Browser bei der naechsten Anfrage nach den Zugangsdaten.
+                Passwort merken — es wird aus Sicherheitsgruenden nie wieder angezeigt.
+            </p>
+            <div id="auth-msg"></div>
         </div>
 
         <!-- Info -->
@@ -523,7 +574,61 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
             if (data.sleep_end !== undefined) {
                 document.getElementById('sleep-end').value = data.sleep_end;
             }
+            // Transport filters
+            document.querySelectorAll('.filter-toggle[data-filter]').forEach(label => {
+                const key = 'filter_' + label.dataset.filter;
+                if (data[key] !== undefined) {
+                    label.querySelector('input').checked = !!data[key];
+                }
+            });
+            // Security — the password itself is never sent back by the device
+            authCurrentlyEnabled = !!data.auth_enabled;
+            document.getElementById('auth-enabled').checked = authCurrentlyEnabled;
         } catch(e) {}
+    }
+
+    // Each filter checkbox saves itself independently, same as the other
+    // per-setting controls (no separate "Speichern" button needed).
+    document.querySelectorAll('.filter-toggle[data-filter]').forEach(label => {
+        label.querySelector('input').addEventListener('change', (e) => {
+            saveSetting('filter_' + label.dataset.filter, e.target.checked ? '1' : '0');
+        });
+    });
+
+    // Set from /api/settings' auth_enabled field — the device is the source
+    // of truth for whether a password already exists, since it's never sent
+    // back to the browser once saved.
+    let authCurrentlyEnabled = false;
+
+    async function saveSecuritySettings() {
+        const enabled = document.getElementById('auth-enabled').checked;
+        const password = document.getElementById('auth-password').value;
+        const msgEl = document.getElementById('auth-msg');
+        if (enabled && !password && !authCurrentlyEnabled) {
+            msgEl.innerHTML = '<div class="msg msg-error">Bitte zuerst ein Passwort setzen</div>';
+            return;
+        }
+        try {
+            const body = 'auth_enabled=' + (enabled ? '1' : '0') +
+                (password ? '&auth_password=' + encodeURIComponent(password) : '');
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok && data.ok) {
+                msgEl.innerHTML = '<div class="msg msg-success">Gespeichert</div>';
+                authCurrentlyEnabled = enabled;
+            } else {
+                msgEl.innerHTML = '<div class="msg msg-error">' + escHtml(data.msg || 'Fehler') + '</div>';
+            }
+            // Never leave the password sitting in the input field
+            document.getElementById('auth-password').value = '';
+            setTimeout(() => msgEl.innerHTML = '', 3000);
+        } catch(e) {
+            msgEl.innerHTML = '<div class="msg msg-error">Fehler</div>';
+        }
     }
 
     function initSleepSelects() {

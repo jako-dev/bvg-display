@@ -42,6 +42,15 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
+      - name: Stamp firmware version from the release tag
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          printf '#pragma once\n#define FW_VERSION "%s"\n' "$VERSION" > esp32/src/version.h
+          echo "Stamped firmware version: $VERSION"
+
       - name: Build firmware
         run: pio run -e esp32dev
         working-directory: esp32
