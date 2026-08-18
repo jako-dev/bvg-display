@@ -75,6 +75,42 @@ int brightnessSetting = 80;  // 0-255
 // API provider
 String apiHost = BVG_API_HOST_DEFAULT;
 
+// Transport type filters — mirrors the web app's filter set so the ESP32
+// board and the browser show the same lines when both are configured.
+struct TransportFilters {
+    bool suburban = true;
+    bool subway = true;
+    bool tram = true;
+    bool bus = true;
+    bool ferry = true;
+    bool express = true;
+    bool regional = true;
+};
+TransportFilters filters;
+
+// ===== Config Page Authentication =====
+// Off by default — the device works exactly as before until the user opts
+// in from the portal's "Sicherheit" card. When enabled, standard HTTP Basic
+// Auth guards the config page and every state-changing endpoint; captive
+// portal detection and read-only status/version endpoints stay open so the
+// initial WiFi setup flow keeps working.
+#define AUTH_USERNAME "admin"
+bool authEnabled = false;
+String authPassword = "";
+
+// Appends the filter query params shared by every departures request.
+String filterQueryParams() {
+    String q;
+    q += "&suburban=" + String(filters.suburban ? "true" : "false");
+    q += "&subway="   + String(filters.subway   ? "true" : "false");
+    q += "&tram="     + String(filters.tram     ? "true" : "false");
+    q += "&bus="      + String(filters.bus      ? "true" : "false");
+    q += "&ferry="    + String(filters.ferry    ? "true" : "false");
+    q += "&express="  + String(filters.express  ? "true" : "false");
+    q += "&regional=" + String(filters.regional ? "true" : "false");
+    return q;
+}
+
 // Stale data tracking
 unsigned long lastSuccessfulFetch = 0;  // millis() of last successful API response
 #define STALE_DATA_THRESHOLD 300000     // 5 minutes in ms
@@ -101,6 +137,10 @@ unsigned long jobFinishedAt = 0;
 unsigned long pendingRebootAt = 0;
 bool pendingFactoryReset = false;
 #define REBOOT_DELAY 800  // ms to let the response drain before restarting
+
+// Set at the start of each /api/firmware/upload request once checkAuth()
+// passes; both of that endpoint's callbacks consult it (see the handler).
+bool otaUploadAuthorized = false;
 
 unsigned long lastScrollTime = 0;
 unsigned long lastWifiCheck = 0;
@@ -129,6 +169,7 @@ String urlEncode(const String& str);
 void processPendingJob();
 void runStationSearch();
 void runFirmwareCheck();
+bool checkAuth(AsyncWebServerRequest* request);
 
 // ===== Setup =====
 void setup() {
@@ -381,10 +422,25 @@ void syncNTP() {
     }
 }
 
+// Guards a handler behind HTTP Basic Auth once the user has enabled it in
+// the portal's "Sicherheit" card. A no-op while auth is off (the default),
+// so existing devices behave exactly as before until someone opts in.
+// The settings handler only ever lets authEnabled become true together with
+// a non-empty password, so there is no "enabled but no password" state here.
+bool checkAuth(AsyncWebServerRequest* request) {
+    if (!authEnabled) return true;
+    if (!request->authenticate(AUTH_USERNAME, authPassword.c_str())) {
+        request->requestAuthentication();
+        return false;
+    }
+    return true;
+}
+
 // ===== Web Server =====
 void setupWebServer() {
     // Serve the configuration page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         // Served straight from flash — no ~20KB heap copy per request
         request->send_P(200, "text/html", PORTAL_HTML);
     });
@@ -402,6 +458,7 @@ void setupWebServer() {
 
     // API: Get current status
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         JsonDocument doc;
         doc["mode"] = (appMode == MODE_AP_SETUP) ? "setup" : "running";
         doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
@@ -429,6 +486,7 @@ void setupWebServer() {
 
     // API: Save WiFi credentials
     server.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
             wifiSSID = request->getParam("ssid", true)->value();
             wifiPassword = request->getParam("password", true)->value();
@@ -444,6 +502,7 @@ void setupWebServer() {
     // Kicks off an asynchronous scan and reports "pending" until it finishes —
     // a synchronous scan would block the web server for several seconds.
     server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         int n = WiFi.scanComplete();
         if (n == WIFI_SCAN_RUNNING) {
             request->send(200, "application/json", "{\"status\":\"pending\"}");
@@ -473,6 +532,7 @@ void setupWebServer() {
     // API: Search BVG stations (proxied so the browser doesn't need CORS).
     // The actual HTTPS call happens in loop(); the client polls /api/job.
     server.on("/api/stations/search", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (!request->hasParam("q")) {
             request->send(400, "application/json", "{\"error\":\"Missing q param\"}");
             return;
@@ -495,6 +555,7 @@ void setupWebServer() {
 
     // API: Poll the result of the queued network job
     server.on("/api/job", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (jobFinished) {
             String body = "{\"status\":\"done\",\"code\":" + String(jobHttpCode) + ",\"data\":" +
                           (jobResult.length() ? jobResult : "null") + "}";
@@ -514,6 +575,7 @@ void setupWebServer() {
 
     // API: Add station
     server.on("/api/stations", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (request->hasParam("id", true) && request->hasParam("name", true)) {
             if (stationCount >= MAX_STATIONS) {
                 request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Max stations reached\"}");
@@ -544,6 +606,7 @@ void setupWebServer() {
 
     // API: Remove station
     server.on("/api/stations/remove", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (request->hasParam("id", true)) {
             String id = request->getParam("id", true)->value();
             int found = -1;
@@ -568,6 +631,7 @@ void setupWebServer() {
 
     // API: Update station walk time
     server.on("/api/stations/walktime", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (request->hasParam("id", true) && request->hasParam("walk_time", true)) {
             String id = request->getParam("id", true)->value();
             int wt = request->getParam("walk_time", true)->value().toInt();
@@ -590,6 +654,7 @@ void setupWebServer() {
 
     // Settings GET
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         JsonDocument doc;
         doc["dep_count"] = depCountSetting;
         doc["scroll_enabled"] = scrollEnabled;
@@ -599,6 +664,15 @@ void setupWebServer() {
         doc["sleep_end"] = sleepEndHour;
         doc["brightness"] = brightnessSetting;
         doc["api_host"] = apiHost;
+        doc["filter_suburban"] = filters.suburban;
+        doc["filter_subway"] = filters.subway;
+        doc["filter_tram"] = filters.tram;
+        doc["filter_bus"] = filters.bus;
+        doc["filter_ferry"] = filters.ferry;
+        doc["filter_express"] = filters.express;
+        doc["filter_regional"] = filters.regional;
+        doc["auth_enabled"] = authEnabled;
+        // Never echo the password back, even to an already-authenticated caller.
         String response;
         serializeJson(doc, response);
         request->send(200, "application/json", response);
@@ -606,6 +680,7 @@ void setupWebServer() {
 
     // Settings POST
     server.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         bool changed = false;
         if (request->hasParam("dep_count", true)) {
             int val = request->getParam("dep_count", true)->value().toInt();
@@ -660,6 +735,48 @@ void setupWebServer() {
                 changed = true;
             }
         }
+        // Transport filters — each is optional and independent, same as the
+        // web app's checkboxes. Any of them changing should refetch.
+        struct { const char* param; bool* field; } filterParams[] = {
+            { "filter_suburban", &filters.suburban },
+            { "filter_subway",   &filters.subway   },
+            { "filter_tram",     &filters.tram     },
+            { "filter_bus",      &filters.bus      },
+            { "filter_ferry",    &filters.ferry    },
+            { "filter_express",  &filters.express  },
+            { "filter_regional", &filters.regional }
+        };
+        for (auto& f : filterParams) {
+            if (request->hasParam(f.param, true)) {
+                *f.field = request->getParam(f.param, true)->value() == "1";
+                lastFetchTime = 0;
+                changed = true;
+            }
+        }
+        // Security: a blank auth_password is ignored rather than clearing the
+        // stored one — there is no way to "empty" it, only replace it. Handled
+        // before auth_enabled below so submitting both together (typical portal
+        // flow: type a password, tick "enabled", save) enables in one request.
+        if (request->hasParam("auth_password", true)) {
+            String val = request->getParam("auth_password", true)->value();
+            if (val.length() > 0) {
+                authPassword = val;
+                changed = true;
+            }
+        }
+        if (request->hasParam("auth_enabled", true)) {
+            bool wantEnabled = request->getParam("auth_enabled", true)->value() == "1";
+            if (!wantEnabled) {
+                authEnabled = false;
+                changed = true;
+            } else if (authPassword.length() > 0) {
+                authEnabled = true;
+                changed = true;
+            } else {
+                request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Set a password before enabling\"}");
+                return;
+            }
+        }
         if (changed) {
             saveSettings();
             request->send(200, "application/json", "{\"ok\":true}");
@@ -670,6 +787,7 @@ void setupWebServer() {
 
     // API: Factory reset
     server.on("/api/factory-reset", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Factory reset. Rebooting...\"}");
         pendingFactoryReset = true;
         pendingRebootAt = millis() + REBOOT_DELAY;
@@ -678,6 +796,7 @@ void setupWebServer() {
     // API: Check for firmware update (GitHub releases).
     // Queued like the station search — the client polls /api/job for the result.
     server.on("/api/firmware/check", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (WiFi.status() != WL_CONNECTED) {
             request->send(503, "application/json", "{\"error\":\"WiFi not connected\"}");
             return;
@@ -695,6 +814,7 @@ void setupWebServer() {
 
     // API: OTA update from URL (GitHub release asset)
     server.on("/api/firmware/update", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         if (!request->hasParam("url", true)) {
             request->send(400, "application/json", "{\"error\":\"Missing url param\"}");
             return;
@@ -787,6 +907,10 @@ void setupWebServer() {
     server.on("/api/firmware/upload", HTTP_POST,
         // Response handler (called after upload completes)
         [](AsyncWebServerRequest* request) {
+            // If auth failed, the upload handler below already sent 401 via
+            // checkAuth()/requestAuthentication() — sending a second response
+            // to the same request is unsafe, so just stop here.
+            if (!otaUploadAuthorized) return;
             if (Update.hasError()) {
                 request->send(500, "application/json", "{\"ok\":false,\"msg\":\"" + String(Update.errorString()) + "\"}");
             } else {
@@ -798,6 +922,11 @@ void setupWebServer() {
         // Upload handler (called for each chunk)
         [](AsyncWebServerRequest* request, const String& filename, size_t index, uint8_t* data, size_t len, bool final) {
             if (index == 0) {
+                // Checked once per upload, before a single byte is written to
+                // flash — never trust a later chunk just because index==0 passed.
+                otaUploadAuthorized = checkAuth(request);
+                if (!otaUploadAuthorized) return;
+
                 Serial.printf("[OTA] Upload start: %s\n", filename.c_str());
                 // Validate magic byte
                 if (len > 0 && data[0] != 0xE9) {
@@ -810,6 +939,7 @@ void setupWebServer() {
                     return;
                 }
             }
+            if (!otaUploadAuthorized) return;
             if (Update.isRunning()) {
                 if (Update.write(data, len) != len) {
                     Serial.printf("[OTA] Write failed: %s\n", Update.errorString());
@@ -827,6 +957,7 @@ void setupWebServer() {
 
     // API: Get firmware version
     server.on("/api/firmware/version", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (!checkAuth(request)) return;
         request->send(200, "application/json", "{\"version\":\"" + String(FW_VERSION) + "\"}");
     });
 
@@ -976,7 +1107,8 @@ void fetchDepartures() {
     for (int s = 0; s < stationCount; s++) {
         String url = "https://" + apiHost + "/stops/" + urlEncode(stations[s].id) +
                      "/departures?duration=" + String(BVG_DEPARTURE_DURATION + stations[s].walkTime) +
-                     "&results=" + String(depCountSetting) + "&pretty=false&language=de";
+                     "&results=" + String(depCountSetting) + "&pretty=false&language=de" +
+                     filterQueryParams();
 
         HTTPClient http;
         http.begin(url);
@@ -1299,7 +1431,18 @@ void loadSettings() {
     sleepEndHour = prefs.getInt("sleepEnd", 6);
     brightnessSetting = prefs.getInt("brightness", 80);
     apiHost = prefs.getString("apiHost", BVG_API_HOST_DEFAULT);
-    
+
+    filters.suburban = prefs.getBool("fSuburban", true);
+    filters.subway   = prefs.getBool("fSubway", true);
+    filters.tram     = prefs.getBool("fTram", true);
+    filters.bus      = prefs.getBool("fBus", true);
+    filters.ferry    = prefs.getBool("fFerry", true);
+    filters.express  = prefs.getBool("fExpress", true);
+    filters.regional = prefs.getBool("fRegional", true);
+
+    authEnabled = prefs.getBool("authOn", false);
+    authPassword = prefs.getString("authPass", "");
+
     for (int i = 0; i < stationCount && i < MAX_STATIONS; i++) {
         stations[i].id = prefs.getString(("st_id_" + String(i)).c_str(), "");
         stations[i].name = prefs.getString(("st_nm_" + String(i)).c_str(), "");
@@ -1323,7 +1466,18 @@ void saveSettings() {
     prefs.putInt("sleepEnd", sleepEndHour);
     prefs.putInt("brightness", brightnessSetting);
     prefs.putString("apiHost", apiHost);
-    
+
+    prefs.putBool("fSuburban", filters.suburban);
+    prefs.putBool("fSubway", filters.subway);
+    prefs.putBool("fTram", filters.tram);
+    prefs.putBool("fBus", filters.bus);
+    prefs.putBool("fFerry", filters.ferry);
+    prefs.putBool("fExpress", filters.express);
+    prefs.putBool("fRegional", filters.regional);
+
+    prefs.putBool("authOn", authEnabled);
+    prefs.putString("authPass", authPassword);
+
     for (int i = 0; i < stationCount; i++) {
         prefs.putString(("st_id_" + String(i)).c_str(), stations[i].id);
         prefs.putString(("st_nm_" + String(i)).c_str(), stations[i].name);

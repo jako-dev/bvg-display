@@ -25,6 +25,8 @@
         kioskMode: false,
         ledScrollEnabled: true, // Scroll through departures in LED mode
         ledScrollSpeed: 3000,   // ms between scroll steps
+        splitLeftId: null,      // Station shown in the left split pane
+        splitRightId: null,     // Station shown in the right split pane
         apiProvider: BvgApi.DEFAULT_PROVIDER,
         filters: {
             suburban: true,
@@ -76,6 +78,8 @@
         splitDeparturesRight: document.getElementById('split-departures-right'),
         splitHeaderLeft: document.getElementById('split-header-left'),
         splitHeaderRight: document.getElementById('split-header-right'),
+        splitLeftSelect: document.getElementById('split-left-select'),
+        splitRightSelect: document.getElementById('split-right-select'),
         // LED view
         viewLed: document.getElementById('view-led'),
         ledView: document.getElementById('led-view'),
@@ -96,6 +100,7 @@
         applyTheme(state.theme);
         applyFiltersToUI();
         renderSavedStations();
+        renderSplitStationSelects();
         renderStationTabs();
         updateDataSourceLabel();
 
@@ -137,6 +142,8 @@
             state.kioskMode = parsed.kioskMode || false;
             state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
             state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
+            state.splitLeftId = parsed.splitLeftId || null;
+            state.splitRightId = parsed.splitRightId || null;
             state.apiProvider = parsed.apiProvider || BvgApi.DEFAULT_PROVIDER;
             state.filters = { ...state.filters, ...parsed.filters };
             BvgApi.setProvider(state.apiProvider);
@@ -159,6 +166,8 @@
                 kioskMode: state.kioskMode,
                 ledScrollEnabled: state.ledScrollEnabled,
                 ledScrollSpeed: state.ledScrollSpeed,
+                splitLeftId: state.splitLeftId,
+                splitRightId: state.splitRightId,
                 apiProvider: state.apiProvider,
                 filters: state.filters
             }));
@@ -290,6 +299,18 @@
         dom.viewSplit.addEventListener('click', () => applyViewMode('split'));
         dom.viewLed.addEventListener('click', () => applyViewMode('led'));
 
+        // Split view station pickers
+        dom.splitLeftSelect.addEventListener('change', (e) => {
+            state.splitLeftId = e.target.value || null;
+            saveState();
+            if (state.viewMode === 'split') fetchSplitDepartures();
+        });
+        dom.splitRightSelect.addEventListener('change', (e) => {
+            state.splitRightId = e.target.value || null;
+            saveState();
+            if (state.viewMode === 'split') fetchSplitDepartures();
+        });
+
         // LED scroll settings
         dom.ledScrollToggle.addEventListener('change', (e) => {
             state.ledScrollEnabled = e.target.checked;
@@ -398,6 +419,7 @@
         state.activeStationId = id;
         saveState();
         renderSavedStations();
+        renderSplitStationSelects();
         renderStationTabs();
         closeSettings();
         refreshCurrentView();
@@ -410,6 +432,7 @@
         }
         saveState();
         renderSavedStations();
+        renderSplitStationSelects();
         renderStationTabs();
         refreshCurrentView();
     }
@@ -432,6 +455,35 @@
                         aria-label="${escapeHtml(station.name)} entfernen" title="Entfernen">&times;</button>
             </div>
         `).join('');
+    }
+
+    /**
+     * Resolve which two stations the split view shows. Falls back to the
+     * first two saved stations whenever the persisted picks are missing or
+     * no longer exist (e.g. after removing a station), and never lets both
+     * panes resolve to the same station.
+     */
+    function getSplitStations() {
+        const byId = (id) => state.stations.find(s => s.id === id) || null;
+        let left = byId(state.splitLeftId) || state.stations[0] || null;
+        let right = byId(state.splitRightId);
+        if (!right || right.id === (left && left.id)) {
+            right = state.stations.find(s => !left || s.id !== left.id) || null;
+        }
+        return { left, right };
+    }
+
+    function renderSplitStationSelects() {
+        const options = (selectedId) => state.stations.map(s =>
+            `<option value="${escapeHtml(s.id)}"${s.id === selectedId ? ' selected' : ''}>${escapeHtml(s.name)}</option>`
+        ).join('');
+
+        const { left, right } = getSplitStations();
+        dom.splitLeftSelect.innerHTML = options(left && left.id);
+        dom.splitRightSelect.innerHTML = options(right && right.id);
+        const noChoice = state.stations.length < 2;
+        dom.splitLeftSelect.disabled = noChoice;
+        dom.splitRightSelect.disabled = noChoice;
     }
 
     function renderStationTabs() {
@@ -805,7 +857,7 @@
             return;
         }
 
-        const [leftStation, rightStation] = state.stations;
+        const { left: leftStation, right: rightStation } = getSplitStations();
         dom.splitHeaderLeft.textContent = leftStation.name;
         dom.splitHeaderRight.textContent = rightStation.name;
 
@@ -911,10 +963,21 @@
         return String(str).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
     }
 
+    // ===== Service Worker =====
+    // Caches the app shell for offline startup / installability. Registration
+    // fails silently under file:// or plain HTTP (the API requires a secure
+    // context), which is fine — the app works the same either way.
+    function registerServiceWorker() {
+        if (!('serviceWorker' in navigator)) return;
+        navigator.serviceWorker.register('./service-worker.js')
+            .catch(e => console.warn('Service worker registration failed:', e));
+    }
+
     // ===== Start =====
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
         init();
     }
+    registerServiceWorker();
 })();
