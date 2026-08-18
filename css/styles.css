@@ -31,6 +31,7 @@
     --font-display: var(--font-mono);
     --row-gap: 0;
     --header-bg: #222222;
+    --accent-soft: rgba(255, 204, 0, 0.1);
 }
 
 /* Modern Minimal Theme */
@@ -59,6 +60,7 @@
     --font-display: var(--font-sans);
     --row-gap: 4px;
     --header-bg: #181825;
+    --accent-soft: rgba(137, 180, 250, 0.12);
 }
 
 /* ===== Reset & Base ===== */
@@ -264,8 +266,20 @@ body {
     opacity: 0.4;
 }
 
+/* Visually hidden but still focusable/announced — display:none would take the
+   checkbox out of the tab order and hide it from assistive tech. */
 .toggle-label input {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    margin: 0;
+    pointer-events: none;
+}
+
+.toggle-label:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 /* ===== Theme Switch ===== */
@@ -289,7 +303,7 @@ body {
 .btn-theme.active {
     border-color: var(--accent);
     color: var(--accent);
-    background: rgba(137, 180, 250, 0.1);
+    background: var(--accent-soft);
 }
 
 /* ===== Buttons ===== */
@@ -358,8 +372,12 @@ body {
 }
 
 .realtime-indicator {
-    color: var(--on-time-color);
+    color: var(--text-muted);
     font-size: 0.7rem;
+}
+
+.realtime-indicator.is-live {
+    color: var(--on-time-color);
     animation: pulse 2s infinite;
 }
 
@@ -470,6 +488,19 @@ body {
     flex: 1;
     overflow-y: auto;
     padding: var(--row-gap) 0;
+}
+
+/* When there are no rows the list must not eat the space the
+   loading / empty / error message needs. */
+#departures-list:empty {
+    flex: 0 0 auto;
+    padding: 0;
+}
+
+#loading-indicator,
+#no-station-msg,
+#board-message {
+    flex: 1;
 }
 
 /* ===== Departure Row ===== */
@@ -666,6 +697,60 @@ body {
 .badge-express { background: #555555; }
 .badge-regional { background: #e30613; }
 
+/* ===== Board Messages ===== */
+.board-message {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 40px 20px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.error-text {
+    color: var(--delay-color);
+}
+
+.error-detail {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.cancelled-text {
+    color: var(--cancelled-color);
+}
+
+.now-text {
+    color: var(--on-time-color);
+}
+
+.empty-hint {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.walk-time-input {
+    width: 50px;
+    text-align: center;
+    padding: 4px 6px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.walk-time-unit {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.saved-station {
+    gap: 8px;
+}
+
 /* ===== Refresh interval input ===== */
 #refresh-interval, #departure-count {
     width: 80px;
@@ -723,22 +808,6 @@ body {
         font-size: 0.75rem;
         padding: 2px 6px;
     }
-}
-
-/* ===== Overlay when settings open ===== */
-.settings-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.5);
-    z-index: 999;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--transition-speed);
-}
-
-.settings-overlay.active {
-    opacity: 1;
-    pointer-events: all;
 }
 
 /* ===== View Mode Switch ===== */
@@ -831,10 +900,6 @@ body {
 }
 
 /* ===== Kiosk Mode ===== */
-body.kiosk-mode {
-    cursor: none;
-}
-
 body.kiosk-mode .display-header {
     padding: 8px 20px;
     border-bottom-width: 1px;
@@ -856,10 +921,6 @@ body.kiosk-mode .display-header:hover .btn-icon {
     opacity: 1;
     pointer-events: all;
     cursor: pointer;
-}
-
-body.kiosk-mode {
-    cursor: default;
 }
 
 body.kiosk-mode .station-tabs {
@@ -966,4 +1027,17 @@ body.kiosk-mode .station-tabs {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     border-radius: 2px;
+}
+
+/* ===== Reduced Motion ===== */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+
+    .departure-row {
+        animation: none;
+    }
 }

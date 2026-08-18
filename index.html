@@ -1,9 +1,13 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="de" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Echtzeit-Abfahrtsmonitor für Berliner Nahverkehr (BVG/VBB) — mehrere Stationen, Fußweg-Filter, Kiosk- und LED-Panel-Ansicht.">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#1a1a1a">
     <title>BVG Abfahrtsmonitor</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%23000'/><text y='24' x='16' text-anchor='middle' font-size='22' font-family='monospace' fill='%23fc0'>B</text></svg>">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -163,7 +167,7 @@
             <div id="station-tabs" class="station-tabs hidden"></div>
 
             <!-- Alerts Banner -->
-            <div id="alerts-banner" class="alerts-banner hidden"></div>
+            <div id="alerts-banner" class="alerts-banner hidden" role="status" aria-live="polite"></div>
 
             <!-- Single Station Board -->
             <div id="single-view" class="board">
@@ -173,16 +177,16 @@
                     <span class="col-platform">Gl.</span>
                     <span class="col-departure">Abfahrt</span>
                 </div>
-                <div id="departures-list" class="departures-list">
-                    <div class="loading" id="loading-indicator">
-                        <div class="loading-spinner"></div>
-                        <p>Lade Abfahrten...</p>
-                    </div>
-                    <div class="no-station hidden" id="no-station-msg">
-                        <p>Bitte wähle eine Station in den Einstellungen aus.</p>
-                        <button id="open-settings-cta" class="btn-primary">Einstellungen öffnen</button>
-                    </div>
+                <div id="departures-list" class="departures-list"></div>
+                <div class="loading hidden" id="loading-indicator">
+                    <div class="loading-spinner"></div>
+                    <p>Lade Abfahrten...</p>
                 </div>
+                <div class="no-station hidden" id="no-station-msg">
+                    <p>Bitte wähle eine Station in den Einstellungen aus.</p>
+                    <button id="open-settings-cta" class="btn-primary">Einstellungen öffnen</button>
+                </div>
+                <div class="board-message hidden" id="board-message"></div>
             </div>
 
             <!-- Split View (two stations side by side) -->
@@ -220,13 +224,13 @@
             <!-- Footer -->
             <div class="display-footer" id="display-footer">
                 <span id="last-update">Letzte Aktualisierung: --:--</span>
-                <span class="data-source">Daten: BVG / VBB</span>
+                <span class="data-source" id="data-source">Daten: BVG / VBB</span>
             </div>
         </div>
     </div>
 
-    <script src="js/api.js"></script>
-    <script src="js/led-renderer.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/api.js" defer></script>
+    <script src="js/led-renderer.js" defer></script>
+    <script src="js/app.js" defer></script>
 </body>
 </html>

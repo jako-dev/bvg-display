@@ -1,22 +1,33 @@
 /**
  * Transport API Module
  * Handles all communication with the transport.rest API
- * Supports BVG (Berlin), VBB (Berlin+Brandenburg), DB (all Germany)
+ * Supports BVG (Berlin) and VBB (Berlin + Brandenburg)
  */
 const BvgApi = (() => {
+    'use strict';
+
     const PROVIDERS = {
         'v6.bvg.transport.rest': 'BVG (Berlin)',
         'v6.vbb.transport.rest': 'VBB (Berlin + Brandenburg)'
     };
 
-    let baseUrl = 'https://v6.bvg.transport.rest';
-    const RATE_LIMIT_DELAY = 650; // ms between requests to stay under 100/min
+    // Transport product keys understood by the transport.rest API.
+    // Shared with the UI so filters, badges and query params can't drift apart.
+    const PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
 
+    const DEFAULT_PROVIDER = 'v6.bvg.transport.rest';
+    const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
+    const REQUEST_TIMEOUT = 12000; // ms
+
+    let baseUrl = 'https://' + DEFAULT_PROVIDER;
     let lastRequestTime = 0;
+    // Serialises slot reservation so parallel callers (LED/split view) queue up
+    // instead of all reading the same timestamp and firing at once.
+    let rateLimitQueue = Promise.resolve();
 
     /**
      * Set the API provider host
-     * @param {string} host - e.g. 'v6.db.transport.rest'
+     * @param {string} host - e.g. 'v6.vbb.transport.rest'
      */
     function setProvider(host) {
         if (PROVIDERS[host]) {
@@ -40,36 +51,49 @@ const BvgApi = (() => {
         return { ...PROVIDERS };
     }
 
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    /**
+     * Reserve the next request slot. Chaining onto a shared promise guarantees
+     * every request starts at least RATE_LIMIT_DELAY after the previous one,
+     * even when several are kicked off in the same tick via Promise.all().
+     * @returns {Promise<void>}
+     */
+    function reserveSlot() {
+        const slot = rateLimitQueue.then(async () => {
+            const wait = RATE_LIMIT_DELAY - (Date.now() - lastRequestTime);
+            if (wait > 0) await sleep(wait);
+            lastRequestTime = Date.now();
+        });
+        rateLimitQueue = slot.catch(() => {});
+        return slot;
+    }
+
     /**
      * Rate-limited fetch wrapper with timeout
      */
     async function rateLimitedFetch(url) {
-        const now = Date.now();
-        const timeSinceLastRequest = now - lastRequestTime;
-        if (timeSinceLastRequest < RATE_LIMIT_DELAY) {
-            await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY - timeSinceLastRequest));
-        }
-        lastRequestTime = Date.now();
+        await reserveSlot();
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
         try {
             const response = await fetch(url, { signal: controller.signal });
-            clearTimeout(timeoutId);
             if (!response.ok) {
                 if (response.status === 429) {
-                    throw new Error('API rate limit exceeded. Please wait.');
+                    throw new Error('API-Limit erreicht. Bitte kurz warten.');
                 }
-                throw new Error(`API error: ${response.status} ${response.statusText}`);
+                throw new Error(`API-Fehler: ${response.status} ${response.statusText}`);
             }
-            return response.json();
+            return await response.json();
         } catch (e) {
-            clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
-                throw new Error('Request timed out. BVG API may be unavailable.');
+                throw new Error('Zeitüberschreitung — die API antwortet nicht.');
             }
             throw e;
+        } finally {
+            clearTimeout(timeoutId);
         }
     }
 
@@ -89,6 +113,7 @@ const BvgApi = (() => {
             pretty: 'false'
         });
         const data = await rateLimitedFetch(`${baseUrl}/locations?${params}`);
+        if (!Array.isArray(data)) return [];
         return data.filter(item => item.type === 'stop');
     }
 
@@ -97,6 +122,7 @@ const BvgApi = (() => {
      * @param {string} stationId - Station ID
      * @param {Object} filters - Transport type filters
      * @param {number} duration - Minutes to look ahead
+     * @param {number|null} results - Max number of departures
      * @returns {Promise<Object>} Departures data
      */
     async function getDepartures(stationId, filters = {}, duration = 30, results = null) {
@@ -110,16 +136,13 @@ const BvgApi = (() => {
         if (results) params.set('results', String(results));
 
         // Apply transport type filters
-        if (filters.suburban !== undefined) params.set('suburban', String(filters.suburban));
-        if (filters.subway !== undefined) params.set('subway', String(filters.subway));
-        if (filters.tram !== undefined) params.set('tram', String(filters.tram));
-        if (filters.bus !== undefined) params.set('bus', String(filters.bus));
-        if (filters.ferry !== undefined) params.set('ferry', String(filters.ferry));
-        if (filters.express !== undefined) params.set('express', String(filters.express));
-        if (filters.regional !== undefined) params.set('regional', String(filters.regional));
+        for (const product of PRODUCTS) {
+            if (filters[product] !== undefined) {
+                params.set(product, String(filters[product]));
+            }
+        }
 
-        const data = await rateLimitedFetch(`${baseUrl}/stops/${encodeURIComponent(stationId)}/departures?${params}`);
-        return data;
+        return rateLimitedFetch(`${baseUrl}/stops/${encodeURIComponent(stationId)}/departures?${params}`);
     }
 
     /**
@@ -136,6 +159,8 @@ const BvgApi = (() => {
     }
 
     return {
+        PRODUCTS,
+        DEFAULT_PROVIDER,
         searchStations,
         getDepartures,
         getStation,

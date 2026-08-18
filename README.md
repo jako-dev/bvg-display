@@ -1,6 +1,6 @@
 # BVG Abfahrtsmonitor
 
-A real-time departure display for Berlin public transport (BVG/VBB), available as a **web app**, an **ESP32 LED matrix display**, and a **Home Assistant integration**.
+A real-time departure display for Berlin public transport (BVG/VBB), available as a **web app** and as **ESP32 LED matrix display** firmware.
 
 Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic).
 
@@ -25,7 +25,7 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 
 - **Real-time departures** from any BVG/VBB station
 - **Multi-station** support with tabs
-- **Per-station walk time** — hides departures you can't reach in time
+- **Per-station walk time** — hides departures you can't reach in time (the lookahead window and result count are widened automatically so the board stays full)
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
@@ -64,6 +64,7 @@ The `esp32/` directory contains firmware for a physical departure display using 
 - **Watchdog** — auto-reboot on hang
 - **Factory reset** — via web UI or hold BOOT button 5 seconds
 - **Stale data indicator** — blinking red dot when API hasn't responded in >5 min
+- **Keeps the last good data** — a failed poll leaves the previous departures on screen instead of blanking the panel
 
 ### Components
 
@@ -169,7 +170,7 @@ bvg-display/
 │       └── web_portal.h    # Embedded config web UI
 └── .github/
     └── workflows/
-        └── build-firmware.yml  # CI: build & attach .bin to releases
+        └── build-firmware.yml  # CI: build on every esp32/ change, attach .bin to releases
 ```
 
 ## API
@@ -195,7 +196,18 @@ Uses the public [transport.rest](https://transport.rest/) APIs:
 | Upload fails | Hold BOOT when upload starts; lower `upload_speed` |
 | No departures | Check serial monitor; BVG API may be temporarily down |
 | Blinking red dot | API stale >5 min — check WiFi and internet connectivity |
+| Station name looks wrong | Umlauts are folded to ASCII (ä→a, ö→o, ü→u, ß→s) — the 4×7 font has no accented glyphs |
 | OTA failed | Device keeps old firmware; retry or use manual .bin upload |
+
+## Security
+
+The ESP32 config page has **no authentication**. Anyone who can reach the device
+on your network can change its settings, trigger a factory reset, or flash new
+firmware. Keep it on a trusted LAN (or a separate IoT VLAN) and do not expose
+port 80 to the internet.
+
+WiFi credentials are stored in the ESP32's NVS partition in plain text, which is
+readable by anyone with physical access and a serial cable.
 
 ## License
 

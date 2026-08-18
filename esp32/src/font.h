@@ -126,8 +126,42 @@ const uint8_t FONT_4x7[][4] PROGMEM = {
     {0x61, 0x51, 0x49, 0x47},
 };
 
-// Draw a character at (x, y) with given color
-// Returns width consumed (char width + 1px gap)
+#define FONT_CHAR_ADVANCE 5   // 4px glyph + 1px gap
+#define FONT_GLYPH_COUNT  59  // ASCII 32..90
+
+// Decode one UTF-8 code point and fold it into the ASCII range the font covers.
+// Station names arrive as UTF-8 ("Schoenhauser Allee" is really "Schönhauser"),
+// so without this every umlaut renders as two blank cells and shifts the rest
+// of the row out of alignment.
+// Advances `p` past the whole sequence and returns the glyph to draw.
+inline char nextGlyph(const char*& p) {
+    uint8_t c = (uint8_t)*p++;
+    if (c < 0x80) return (char)c;
+
+    if ((c & 0xE0) == 0xC0 && ((uint8_t)*p & 0xC0) == 0x80) {
+        uint16_t cp = ((c & 0x1F) << 6) | ((uint8_t)*p++ & 0x3F);
+        switch (cp) {
+            case 0x00C4: return 'A';  // A-umlaut
+            case 0x00D6: return 'O';  // O-umlaut
+            case 0x00DC: return 'U';  // U-umlaut
+            case 0x00E4: return 'a';
+            case 0x00F6: return 'o';
+            case 0x00FC: return 'u';
+            case 0x00DF: return 's';  // sharp s
+            case 0x00E9: case 0x00E8: return 'e';
+            case 0x00C9: case 0x00C8: return 'E';
+            default: return '?';
+        }
+    }
+
+    // 3- and 4-byte sequences have no equivalent — skip their continuation bytes
+    while (((uint8_t)*p & 0xC0) == 0x80) p++;
+    return '?';
+}
+
+// Draw a single (already folded) character at (x, y).
+// Always advances by FONT_CHAR_ADVANCE so measureString() and drawString() agree
+// even when a character has no glyph.
 inline int drawChar(MatrixPanel_I2S_DMA* matrix, char ch, int x, int y, uint16_t color) {
     int idx = -1;
     if (ch >= 32 && ch <= 90) {
@@ -136,8 +170,8 @@ inline int drawChar(MatrixPanel_I2S_DMA* matrix, char ch, int x, int y, uint16_t
         idx = (ch - 'a') + ('A' - 32); // Map lowercase to uppercase
     }
 
-    if (idx < 0 || idx >= 59) {
-        return 4; // unknown char, skip space
+    if (idx < 0 || idx >= FONT_GLYPH_COUNT) {
+        return FONT_CHAR_ADVANCE; // unknown char, leave a blank cell
     }
 
     for (int col = 0; col < 4; col++) {
@@ -150,21 +184,38 @@ inline int drawChar(MatrixPanel_I2S_DMA* matrix, char ch, int x, int y, uint16_t
             }
         }
     }
-    return 5; // 4px char + 1px gap
+    return FONT_CHAR_ADVANCE;
 }
 
-// Draw a string at (x, y)
+// Draw a UTF-8 string at (x, y)
 inline int drawString(MatrixPanel_I2S_DMA* matrix, const char* str, int x, int y, uint16_t color) {
     int cx = x;
     while (*str) {
-        cx += drawChar(matrix, *str, cx, y, color);
-        str++;
+        cx += drawChar(matrix, nextGlyph(str), cx, y, color);
     }
     return cx - x;
 }
 
-// Measure string width in pixels
+// Number of drawable glyphs in a UTF-8 string
+inline int glyphCount(const char* str) {
+    int n = 0;
+    while (*str) { nextGlyph(str); n++; }
+    return n;
+}
+
+// Measure a UTF-8 string's rendered width in pixels
 inline int measureString(const char* str) {
-    int len = strlen(str);
-    return len > 0 ? (len * 5 - 1) : 0;
+    int n = glyphCount(str);
+    return n > 0 ? (n * FONT_CHAR_ADVANCE - 1) : 0;
+}
+
+// Truncate a UTF-8 string to at most `maxGlyphs` glyphs without splitting a
+// multi-byte sequence in half.
+inline String truncateUtf8(const String& str, int maxGlyphs) {
+    if (maxGlyphs <= 0) return String("");
+    const char* start = str.c_str();
+    const char* p = start;
+    int n = 0;
+    while (*p && n < maxGlyphs) { nextGlyph(p); n++; }
+    return str.substring(0, p - start);
 }

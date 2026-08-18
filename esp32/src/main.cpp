@@ -83,6 +83,25 @@ unsigned long lastSuccessfulFetch = 0;  // millis() of last successful API respo
 #define RESET_BUTTON_PIN 0  // BOOT button on most ESP32 dev boards
 #define RESET_HOLD_TIME 5000  // Hold 5 seconds to factory reset
 
+// ===== Deferred work =====
+// AsyncWebServer callbacks run on the AsyncTCP task. That task has a small
+// stack and must never block: an HTTPS request there stalls every other
+// connection for the duration of the TLS handshake and can overflow the stack.
+// Handlers therefore queue the work and loop() carries it out.
+enum JobType { JOB_NONE, JOB_STATION_SEARCH, JOB_FIRMWARE_CHECK };
+JobType jobType = JOB_NONE;
+String jobParam;
+String jobResult;
+int jobHttpCode = 0;
+bool jobFinished = false;
+unsigned long jobFinishedAt = 0;
+#define JOB_RESULT_TTL 60000  // ms a finished result is kept if nobody polls
+
+// Reboots are also deferred, so the HTTP response is actually flushed first.
+unsigned long pendingRebootAt = 0;
+bool pendingFactoryReset = false;
+#define REBOOT_DELAY 800  // ms to let the response drain before restarting
+
 unsigned long lastScrollTime = 0;
 unsigned long lastWifiCheck = 0;
 int scrollOffset = 0;
@@ -96,15 +115,20 @@ void connectWiFi();
 void checkWiFiReconnect();
 void syncNTP();
 void fetchDepartures();
-void parseDeparturesAppend(const String& json);
+void parseDeparturesAppend(Stream& stream);
 void sortDepartures();
 void renderDisplay();
+void renderDepartureRow(const Departure& dep, int y);
 void renderSetupScreen();
 void renderTextCentered(const char* text, uint16_t color);
 void loadSettings();
 void saveSettings();
 void factoryReset();
 uint16_t getLineColor(const String& product, const String& lineName);
+String urlEncode(const String& str);
+void processPendingJob();
+void runStationSearch();
+void runFirmwareCheck();
 
 // ===== Setup =====
 void setup() {
@@ -154,8 +178,18 @@ void setup() {
 
     setupWebServer();
 
-    // Enable hardware watchdog (60 second timeout)
+    // Enable hardware watchdog (60 second timeout).
+    // The init signature changed in ESP-IDF 5 / arduino-esp32 3.x.
+#if ESP_IDF_VERSION_MAJOR >= 5
+    esp_task_wdt_config_t wdtConfig = {
+        .timeout_ms = 60000,
+        .idle_core_mask = 0,
+        .trigger_panic = true
+    };
+    esp_task_wdt_init(&wdtConfig);
+#else
     esp_task_wdt_init(60, true);
+#endif
     esp_task_wdt_add(NULL);
 
     Serial.println("Setup complete. Mode: " + String(appMode == MODE_AP_SETUP ? "AP Setup" : "Running"));
@@ -165,6 +199,16 @@ void setup() {
 void loop() {
     // Feed watchdog
     esp_task_wdt_reset();
+
+    // Deferred reboot requested by a web handler
+    if (pendingRebootAt != 0 && millis() >= pendingRebootAt) {
+        pendingRebootAt = 0;
+        if (pendingFactoryReset) factoryReset();
+        else ESP.restart();
+    }
+
+    // Network work handed over by the (non-blocking) web handlers
+    processPendingJob();
 
     // Check factory reset button (BOOT button held for 5 seconds)
     static unsigned long resetBtnStart = 0;
@@ -341,7 +385,8 @@ void syncNTP() {
 void setupWebServer() {
     // Serve the configuration page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-        request->send(200, "text/html", getPortalHTML());
+        // Served straight from flash — no ~20KB heap copy per request
+        request->send_P(200, "text/html", PORTAL_HTML);
     });
 
     // Captive portal detection endpoints
@@ -389,17 +434,29 @@ void setupWebServer() {
             wifiPassword = request->getParam("password", true)->value();
             saveSettings();
             request->send(200, "application/json", "{\"ok\":true,\"msg\":\"WiFi saved. Restarting...\"}");
-            delay(1000);
-            ESP.restart();
+            pendingRebootAt = millis() + REBOOT_DELAY;
         } else {
             request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing ssid or password\"}");
         }
     });
 
-    // API: Scan WiFi networks
+    // API: Scan WiFi networks.
+    // Kicks off an asynchronous scan and reports "pending" until it finishes —
+    // a synchronous scan would block the web server for several seconds.
     server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* request) {
-        int n = WiFi.scanNetworks();
+        int n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_RUNNING) {
+            request->send(200, "application/json", "{\"status\":\"pending\"}");
+            return;
+        }
+        if (n == WIFI_SCAN_FAILED) {
+            WiFi.scanNetworks(true);  // async
+            request->send(200, "application/json", "{\"status\":\"pending\"}");
+            return;
+        }
+
         JsonDocument doc;
+        doc["status"] = "done";
         JsonArray networks = doc["networks"].to<JsonArray>();
         for (int i = 0; i < n && i < 20; i++) {
             JsonObject net = networks.add<JsonObject>();
@@ -413,7 +470,8 @@ void setupWebServer() {
         request->send(200, "application/json", response);
     });
 
-    // API: Search BVG stations (proxy to avoid CORS on ESP)
+    // API: Search BVG stations (proxied so the browser doesn't need CORS).
+    // The actual HTTPS call happens in loop(); the client polls /api/job.
     server.on("/api/stations/search", HTTP_GET, [](AsyncWebServerRequest* request) {
         if (!request->hasParam("q")) {
             request->send(400, "application/json", "{\"error\":\"Missing q param\"}");
@@ -423,21 +481,35 @@ void setupWebServer() {
             request->send(503, "application/json", "{\"error\":\"WiFi not connected\"}");
             return;
         }
-        String query = request->getParam("q")->value();
-        
-        HTTPClient http;
-        String url = "https://" + apiHost + "/locations?query=" + 
-                     urlEncode(query) + "&results=5&stops=true&addresses=false&poi=false&pretty=false";
-        http.begin(url);
-        http.setTimeout(8000);
-        int httpCode = http.GET();
-        
-        if (httpCode == 200) {
-            request->send(200, "application/json", http.getString());
-        } else {
-            request->send(502, "application/json", "{\"error\":\"API request failed\",\"code\":" + String(httpCode) + "}");
+        if (jobType != JOB_NONE) {
+            request->send(429, "application/json", "{\"error\":\"Busy, try again\"}");
+            return;
         }
-        http.end();
+        jobParam = request->getParam("q")->value();
+        jobResult = "";
+        jobHttpCode = 0;
+        jobFinished = false;
+        jobType = JOB_STATION_SEARCH;
+        request->send(202, "application/json", "{\"status\":\"pending\"}");
+    });
+
+    // API: Poll the result of the queued network job
+    server.on("/api/job", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (jobFinished) {
+            String body = "{\"status\":\"done\",\"code\":" + String(jobHttpCode) + ",\"data\":" +
+                          (jobResult.length() ? jobResult : "null") + "}";
+            request->send(200, "application/json", body);
+            // One-shot: clear so the next request can queue work. jobType is
+            // reset first — otherwise processPendingJob() could observe
+            // "queued but not finished" and run the job all over again.
+            jobType = JOB_NONE;
+            jobFinished = false;
+            jobResult = "";
+        } else if (jobType != JOB_NONE) {
+            request->send(200, "application/json", "{\"status\":\"pending\"}");
+        } else {
+            request->send(404, "application/json", "{\"status\":\"none\"}");
+        }
     });
 
     // API: Add station
@@ -489,6 +561,8 @@ void setupWebServer() {
             } else {
                 request->send(404, "application/json", "{\"ok\":false,\"msg\":\"Not found\"}");
             }
+        } else {
+            request->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing id\"}");
         }
     });
 
@@ -597,60 +671,26 @@ void setupWebServer() {
     // API: Factory reset
     server.on("/api/factory-reset", HTTP_POST, [](AsyncWebServerRequest* request) {
         request->send(200, "application/json", "{\"ok\":true,\"msg\":\"Factory reset. Rebooting...\"}");
-        delay(500);
-        factoryReset();
+        pendingFactoryReset = true;
+        pendingRebootAt = millis() + REBOOT_DELAY;
     });
 
-    // API: Check for firmware update (GitHub releases)
+    // API: Check for firmware update (GitHub releases).
+    // Queued like the station search — the client polls /api/job for the result.
     server.on("/api/firmware/check", HTTP_GET, [](AsyncWebServerRequest* request) {
         if (WiFi.status() != WL_CONNECTED) {
             request->send(503, "application/json", "{\"error\":\"WiFi not connected\"}");
             return;
         }
-        HTTPClient http;
-        http.begin(GITHUB_RELEASE_URL);
-        http.setTimeout(10000);
-        http.addHeader("User-Agent", "ESP32-BVG-Display");
-        int httpCode = http.GET();
-        if (httpCode != 200) {
-            request->send(502, "application/json", "{\"error\":\"GitHub API error\",\"code\":" + String(httpCode) + "}");
-            http.end();
+        if (jobType != JOB_NONE) {
+            request->send(429, "application/json", "{\"error\":\"Busy, try again\"}");
             return;
         }
-        String payload = http.getString();
-        http.end();
-
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, payload);
-        if (err) {
-            request->send(500, "application/json", "{\"error\":\"JSON parse failed\"}");
-            return;
-        }
-
-        String tagName = doc["tag_name"] | "";
-        String releaseName = doc["name"] | tagName;
-        String body = doc["body"] | "";
-        String downloadUrl = "";
-
-        JsonArray assets = doc["assets"].as<JsonArray>();
-        for (JsonObject asset : assets) {
-            String name = asset["name"] | "";
-            if (name == FW_ASSET_NAME) {
-                downloadUrl = asset["browser_download_url"].as<String>();
-                break;
-            }
-        }
-
-        JsonDocument resp;
-        resp["current_version"] = FW_VERSION;
-        resp["latest_version"] = tagName;
-        resp["release_name"] = releaseName;
-        resp["release_notes"] = body;
-        resp["download_url"] = downloadUrl;
-        resp["update_available"] = (tagName != "" && tagName != "v" + String(FW_VERSION) && tagName != String(FW_VERSION));
-        String response;
-        serializeJson(resp, response);
-        request->send(200, "application/json", response);
+        jobResult = "";
+        jobHttpCode = 0;
+        jobFinished = false;
+        jobType = JOB_FIRMWARE_CHECK;
+        request->send(202, "application/json", "{\"status\":\"pending\"}");
     });
 
     // API: OTA update from URL (GitHub release asset)
@@ -696,8 +736,14 @@ void setupWebServer() {
             }
 
             WiFiClient* stream = http.getStreamPtr();
-            // Validate ESP32 firmware magic byte
-            uint8_t firstByte;
+
+            // Validate the ESP32 firmware magic byte. peek() returns -1 while
+            // the socket buffer is still empty, so wait for the first byte
+            // instead of rejecting a perfectly good image.
+            unsigned long waitStart = millis();
+            while (stream->available() < 1 && millis() - waitStart < 10000) {
+                delay(10);
+            }
             if (stream->peek() != 0xE9) {
                 Serial.println("[OTA] Invalid firmware (bad magic byte)");
                 http.end();
@@ -793,16 +839,143 @@ void setupWebServer() {
     Serial.println("Web server started");
 }
 
+// ===== Deferred Network Jobs =====
+// Run from loop() so the AsyncTCP task is never blocked by a TLS handshake.
+void processPendingJob() {
+    if (jobType == JOB_NONE) return;
+
+    if (jobFinished) {
+        // Nobody collected the result (page closed mid-request) — drop it so
+        // the next search isn't rejected as "busy" forever.
+        if (millis() - jobFinishedAt > JOB_RESULT_TTL) {
+            jobType = JOB_NONE;
+            jobFinished = false;
+            jobResult = "";
+        }
+        return;
+    }
+
+    switch (jobType) {
+        case JOB_STATION_SEARCH: runStationSearch(); break;
+        case JOB_FIRMWARE_CHECK: runFirmwareCheck(); break;
+        default: break;
+    }
+    jobFinishedAt = millis();
+    jobFinished = true;
+}
+
+void runStationSearch() {
+    if (WiFi.status() != WL_CONNECTED) {
+        jobHttpCode = 503;
+        jobResult = "null";
+        return;
+    }
+
+    HTTPClient http;
+    String url = "https://" + apiHost + "/locations?query=" + urlEncode(jobParam) +
+                 "&results=5&stops=true&addresses=false&poi=false&pretty=false";
+    http.begin(url);
+    http.setTimeout(8000);
+    jobHttpCode = http.GET();
+
+    if (jobHttpCode == 200) {
+        // Keep only the fields the portal needs — the raw response carries a
+        // lot of geo/product data that would waste both heap and bandwidth.
+        JsonDocument filter;
+        JsonObject item = filter.add<JsonObject>();
+        item["id"] = true;
+        item["name"] = true;
+        item["type"] = true;
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, http.getStream(),
+                                                  DeserializationOption::Filter(filter));
+        if (err) {
+            jobHttpCode = 500;
+            jobResult = "null";
+        } else {
+            serializeJson(doc, jobResult);
+        }
+    } else {
+        jobResult = "null";
+    }
+    http.end();
+}
+
+void runFirmwareCheck() {
+    if (WiFi.status() != WL_CONNECTED) {
+        jobHttpCode = 503;
+        jobResult = "null";
+        return;
+    }
+
+    HTTPClient http;
+    http.begin(GITHUB_RELEASE_URL);
+    http.setTimeout(10000);
+    http.addHeader("User-Agent", "ESP32-BVG-Display");
+    int code = http.GET();
+    if (code != 200) {
+        jobHttpCode = 502;
+        jobResult = "null";
+        http.end();
+        return;
+    }
+
+    // The GitHub release payload is tens of kilobytes; filter it down while
+    // streaming so it never has to fit in RAM as a String.
+    JsonDocument filter;
+    filter["tag_name"] = true;
+    filter["name"] = true;
+    filter["body"] = true;
+    JsonObject asset = filter["assets"].add<JsonObject>();
+    asset["name"] = true;
+    asset["browser_download_url"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream(),
+                                              DeserializationOption::Filter(filter));
+    http.end();
+
+    if (err) {
+        jobHttpCode = 500;
+        jobResult = "null";
+        return;
+    }
+
+    String tagName = doc["tag_name"] | "";
+    String downloadUrl = "";
+    for (JsonObject a : doc["assets"].as<JsonArray>()) {
+        String assetName = a["name"].as<String>();
+        if (assetName == FW_ASSET_NAME) {
+            downloadUrl = a["browser_download_url"].as<String>();
+            break;
+        }
+    }
+
+    JsonDocument resp;
+    resp["current_version"] = FW_VERSION;
+    resp["latest_version"] = tagName;
+    resp["release_name"] = doc["name"] | tagName;
+    resp["release_notes"] = doc["body"] | "";
+    resp["download_url"] = downloadUrl;
+    resp["update_available"] =
+        (tagName != "" && tagName != "v" + String(FW_VERSION) && tagName != String(FW_VERSION));
+
+    jobHttpCode = 200;
+    serializeJson(resp, jobResult);
+}
+
 // ===== BVG API =====
 void fetchDepartures() {
     if (WiFi.status() != WL_CONNECTED || stationCount == 0) return;
-    
-    // Fetch from all configured stations and merge
-    departureCount = 0;
+
+    // Keep the previous departures on screen until at least one station has
+    // answered. Clearing up front meant a single failed poll blanked the panel.
+    bool anySuccess = false;
 
     for (int s = 0; s < stationCount; s++) {
-        String url = "https://" + apiHost + "/stops/" + stations[s].id + 
-                     "/departures?duration=" + String(BVG_DEPARTURE_DURATION) + 
+        String url = "https://" + apiHost + "/stops/" + urlEncode(stations[s].id) +
+                     "/departures?duration=" + String(BVG_DEPARTURE_DURATION + stations[s].walkTime) +
                      "&results=" + String(depCountSetting) + "&pretty=false&language=de";
 
         HTTPClient http;
@@ -811,9 +984,13 @@ void fetchDepartures() {
         int httpCode = http.GET();
 
         if (httpCode == 200) {
-            String payload = http.getString();
+            if (!anySuccess) {
+                departureCount = 0;
+                anySuccess = true;
+            }
             int countBefore = departureCount;
-            parseDeparturesAppend(payload);
+            parseDeparturesAppend(http.getStream());
+
             // Filter this station's departures by its walk time
             if (stations[s].walkTime > 0) {
                 int writeIdx = countBefore;
@@ -828,95 +1005,101 @@ void fetchDepartures() {
             Serial.println("Station " + stations[s].name + ": OK (" + String(departureCount - countBefore) + " deps)");
         } else if (httpCode == 429) {
             Serial.println("Rate limited for " + stations[s].name + ", skipping remaining");
+            http.end();
             break; // Don't hammer the API
         } else {
             Serial.println("API error for " + stations[s].name + ": " + String(httpCode));
         }
         http.end();
+        esp_task_wdt_reset();  // multi-station polls can approach the WDT window
 
         // Small delay between multi-station fetches to avoid rate limiting
         if (s < stationCount - 1) delay(200);
     }
 
+    if (!anySuccess) {
+        Serial.println("All stations failed — keeping previous departures");
+        return;
+    }
+
     // Sort merged departures by minutesUntil
     sortDepartures();
     scrollOffset = 0;
-    if (departureCount > 0) {
-        lastSuccessfulFetch = millis();
-    }
+    lastSuccessfulFetch = millis();
     Serial.println("Total merged departures: " + String(departureCount));
 }
 
-void parseDeparturesAppend(const String& json) {
+void parseDeparturesAppend(Stream& stream) {
+    // Parse straight from the socket and keep only the fields that get drawn.
+    // The full response for several stations is far larger than the free heap,
+    // so buffering it into a String could fail outright.
+    JsonDocument filter;
+    JsonObject dep = filter["departures"].add<JsonObject>();
+    dep["direction"] = true;
+    dep["when"] = true;
+    dep["plannedWhen"] = true;
+    dep["cancelled"] = true;
+    dep["delay"] = true;
+    dep["line"]["name"] = true;
+    dep["line"]["product"] = true;
+
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
+    DeserializationError err = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
     if (err) {
         Serial.println("JSON parse error: " + String(err.c_str()));
         return;
     }
 
     JsonArray deps = doc["departures"].as<JsonArray>();
-    if (deps.isNull()) {
-        // Fallback: some API versions return array directly
-        deps = doc.as<JsonArray>();
-        if (deps.isNull()) return;
-    }
+    if (deps.isNull()) return;
 
-    for (JsonObject dep : deps) {
+    for (JsonObject d : deps) {
         if (departureCount >= BVG_MAX_DEPARTURES) break;
 
-        Departure& d = departures[departureCount];
-        d.lineName = dep["line"]["name"].as<String>();
-        d.direction = dep["direction"].as<String>();
-        d.product = dep["line"]["product"].as<String>();
-        d.cancelled = dep["cancelled"] | false;
-        d.delaySeconds = dep["delay"] | 0;
+        Departure& out = departures[departureCount];
+        out.lineName = d["line"]["name"].as<String>();
+        out.direction = d["direction"].as<String>();
+        out.product = d["line"]["product"].as<String>();
+        out.cancelled = d["cancelled"] | false;
+        out.delaySeconds = d["delay"] | 0;
 
         // Calculate minutes until departure
-        const char* whenStr = dep["when"] | (const char*)nullptr;
-        if (!whenStr) whenStr = dep["plannedWhen"] | (const char*)nullptr;
-        
+        const char* whenStr = d["when"] | (const char*)nullptr;
+        if (!whenStr) whenStr = d["plannedWhen"] | (const char*)nullptr;
+
+        out.minutesUntil = -1;
         if (whenStr) {
             // Parse ISO 8601: "2026-05-06T13:09:00+02:00"
-            struct tm tm = {};
+            struct tm tmv = {};
             int tzHour = 0, tzMin = 0;
             char tzSign = '+';
             int parsed = sscanf(whenStr, "%d-%d-%dT%d:%d:%d%c%d:%d",
-                   &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-                   &tm.tm_hour, &tm.tm_min, &tm.tm_sec,
+                   &tmv.tm_year, &tmv.tm_mon, &tmv.tm_mday,
+                   &tmv.tm_hour, &tmv.tm_min, &tmv.tm_sec,
                    &tzSign, &tzHour, &tzMin);
-            
+
             if (parsed >= 6) {
-                tm.tm_year -= 1900;
-                tm.tm_mon -= 1;
-                tm.tm_isdst = 0;
-                
-                // mktime interprets tm as local time, but we want to treat it
-                // as the timezone specified in the string. Convert to UTC.
-                // First get the epoch assuming UTC (using timegm equivalent)
-                time_t depEpoch = mktime(&tm);
-                // mktime assumes local time (CET/CEST due to configTzTime),
-                // so correct for local timezone offset
+                tmv.tm_year -= 1900;
+                tmv.tm_mon -= 1;
+                tmv.tm_isdst = 0;
+
+                // mktime() reads tmv as local time, but the string carries its
+                // own offset. Undo the local offset, then apply the string's.
+                time_t depEpoch = mktime(&tmv);
                 struct tm check;
                 localtime_r(&depEpoch, &check);
-                depEpoch += check.tm_gmtoff; // Now it's as if tm was UTC
-                
-                // Apply the string's timezone offset to get true UTC
+                depEpoch += check.tm_gmtoff; // Now it's as if tmv was UTC
+
                 int tzOffsetSec = (tzHour * 3600 + tzMin * 60);
                 if (tzSign == '+') depEpoch -= tzOffsetSec;
-                else depEpoch += tzOffsetSec;
-                
-                // time() on ESP32 returns UTC epoch
+                else if (tzSign == '-') depEpoch += tzOffsetSec;
+
                 time_t nowUtc;
                 time(&nowUtc);
-                
-                d.minutesUntil = (int)((depEpoch - nowUtc) / 60);
-                if (d.minutesUntil < 0) d.minutesUntil = 0;
-            } else {
-                d.minutesUntil = -1;
+
+                out.minutesUntil = (int)((depEpoch - nowUtc) / 60);
+                if (out.minutesUntil < 0) out.minutesUntil = 0;
             }
-        } else {
-            d.minutesUntil = -1;
         }
 
         departureCount++;
@@ -992,18 +1175,12 @@ void renderDepartureRow(const Departure& dep, int y) {
     uint16_t green = matrix->color565(0, 255, 0);
 
     // Line badge background
-    int badgeWidth = dep.lineName.length() * 5 + 2;
+    int badgeWidth = measureString(dep.lineName.c_str()) + 3;
     matrix->fillRect(0, y, badgeWidth, 8, lineColor);
 
     // Line name
     uint16_t textColor = white;
     drawString(matrix, dep.lineName.c_str(), 1, y + 1, textColor);
-
-    // Direction (truncated)
-    int destX = badgeWidth + 2;
-    String truncDir = dep.direction.substring(0, 14);
-    uint16_t destColor = dep.cancelled ? matrix->color565(100, 100, 100) : white;
-    drawString(matrix, truncDir.c_str(), destX, y + 1, destColor);
 
     // Time
     String timeStr;
@@ -1022,8 +1199,17 @@ void renderDepartureRow(const Departure& dep, int y) {
         timeColor = yellow;
     }
 
-    int timeWidth = measureString(timeStr.c_str());
-    drawString(matrix, timeStr.c_str(), MATRIX_WIDTH - timeWidth - 1, y + 1, timeColor);
+    int timeX = MATRIX_WIDTH - measureString(timeStr.c_str()) - 1;
+    drawString(matrix, timeStr.c_str(), timeX, y + 1, timeColor);
+
+    // Direction fills whatever is left between badge and time. Sized from the
+    // actual gap rather than a fixed 14 characters, and truncated on glyph
+    // boundaries so a multi-byte character is never cut in half.
+    int destX = badgeWidth + 2;
+    int available = timeX - destX - 2;
+    int maxGlyphs = available / FONT_CHAR_ADVANCE;
+    uint16_t destColor = dep.cancelled ? matrix->color565(100, 100, 100) : white;
+    drawString(matrix, truncateUtf8(dep.direction, maxGlyphs).c_str(), destX, y + 1, destColor);
 }
 
 void renderTextCentered(const char* text, uint16_t color) {

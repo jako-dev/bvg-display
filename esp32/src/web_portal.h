@@ -5,8 +5,7 @@
 // This is served at http://192.168.4.1/ when in AP mode,
 // or at the device's IP when connected to WiFi.
 
-String getPortalHTML() {
-    return R"rawhtml(
+const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="de">
 <head>
@@ -290,23 +289,59 @@ String getPortalHTML() {
         }
     }
 
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
     async function scanWifi() {
         document.getElementById('wifi-scanning').classList.remove('hidden');
         document.getElementById('wifi-list').innerHTML = '';
+        const list = document.getElementById('wifi-list');
         try {
-            const r = await fetch('/api/wifi/scan');
-            const data = await r.json();
+            // The device scans asynchronously so the web server stays responsive
+            let data = null;
+            for (let i = 0; i < 20; i++) {
+                const r = await fetch('/api/wifi/scan');
+                data = await r.json();
+                if (data.status === 'done') break;
+                await sleep(1000);
+            }
             document.getElementById('wifi-scanning').classList.add('hidden');
-            const list = document.getElementById('wifi-list');
-            list.innerHTML = data.networks.map(n => 
-                '<li class="wifi-item" onclick="selectWifi(\'' + n.ssid.replace(/'/g, "\\'") + '\')">' +
-                '<span class="name">' + n.ssid + (n.encrypted ? ' 🔒' : '') + '</span>' +
+            if (!data || data.status !== 'done') {
+                list.innerHTML = '<li class="wifi-item">Zeitueberschreitung beim Scan</li>';
+                return;
+            }
+            if (!data.networks || !data.networks.length) {
+                list.innerHTML = '<li class="wifi-item">Keine Netzwerke gefunden</li>';
+                return;
+            }
+            list.innerHTML = data.networks.map((n, i) =>
+                '<li class="wifi-item" data-idx="' + i + '">' +
+                '<span class="name">' + escHtml(n.ssid) + (n.encrypted ? ' 🔒' : '') + '</span>' +
                 '<span class="signal">' + n.rssi + ' dBm</span></li>'
             ).join('');
+            // Bind by index instead of interpolating the SSID into an onclick
+            // attribute — network names are attacker-controlled text.
+            list.querySelectorAll('.wifi-item[data-idx]').forEach(el => {
+                el.onclick = () => selectWifi(data.networks[el.dataset.idx].ssid);
+            });
         } catch(e) {
             document.getElementById('wifi-scanning').classList.add('hidden');
-            document.getElementById('wifi-list').innerHTML = '<li class="wifi-item">Scan fehlgeschlagen</li>';
+            list.innerHTML = '<li class="wifi-item">Scan fehlgeschlagen</li>';
         }
+    }
+
+    // Poll a queued device job (station search / firmware check) to completion
+    async function pollJob(attempts = 25) {
+        for (let i = 0; i < attempts; i++) {
+            await sleep(400);
+            const r = await fetch('/api/job');
+            if (r.status === 404) throw new Error('Job nicht gefunden');
+            const j = await r.json();
+            if (j.status === 'done') {
+                if (j.code !== 200) throw new Error('Geraet meldet Fehler ' + j.code);
+                return j.data;
+            }
+        }
+        throw new Error('Zeitueberschreitung');
     }
 
     function selectWifi(ssid) {
@@ -343,12 +378,18 @@ String getPortalHTML() {
             '<span class="name">' + escHtml(s.name) + '</span>' +
             '<div style="display:flex;align-items:center;gap:6px;">' +
             '<input type="number" min="0" max="30" value="' + (s.walk_time || 0) + '" ' +
-            'onchange="updateWalkTime(\'' + s.id + '\', this.value)" ' +
+            'data-id="' + escHtml(s.id) + '" class="walk-input" ' +
             'style="width:50px;padding:4px 6px;border:1px solid #2a2a4a;border-radius:6px;background:#0f3460;color:#eee;text-align:center;font-size:0.85rem;" title="Fussweg (Minuten)">' +
             '<span style="font-size:0.7rem;color:#888;">min</span>' +
-            '<button class="btn-danger btn-small" onclick="removeStation(\'' + s.id + '\')">Entfernen</button>' +
+            '<button class="btn-danger btn-small remove-btn" data-id="' + escHtml(s.id) + '">Entfernen</button>' +
             '</div></div>'
         ).join('');
+        list.querySelectorAll('.walk-input').forEach(el => {
+            el.onchange = () => updateWalkTime(el.dataset.id, el.value);
+        });
+        list.querySelectorAll('.remove-btn').forEach(el => {
+            el.onclick = () => removeStation(el.dataset.id);
+        });
     }
 
     let searchTimeout;
@@ -364,19 +405,29 @@ String getPortalHTML() {
             return;
         }
         searchTimeout = setTimeout(async () => {
+            const box = document.getElementById('search-results');
             document.getElementById('search-loading').classList.remove('hidden');
             try {
-                const r = await fetch('/api/stations/search?q=' + encodeURIComponent(query));
-                const data = await r.json();
+                const start = await fetch('/api/stations/search?q=' + encodeURIComponent(query));
+                if (start.status === 429) throw new Error('Geraet ist beschaeftigt');
+                if (!start.ok) throw new Error('Suche fehlgeschlagen');
+                const data = await pollJob();
                 document.getElementById('search-loading').classList.add('hidden');
                 const results = Array.isArray(data) ? data.filter(x => x.type === 'stop') : [];
-                document.getElementById('search-results').innerHTML = results.map(s =>
-                    '<div class="search-result" onclick="addStation(\'' + s.id + '\', \'' + 
-                    escHtml(s.name).replace(/'/g, "\\'") + '\')">' + escHtml(s.name) + '</div>'
+                if (!results.length) {
+                    box.innerHTML = '<div class="search-result">Keine Ergebnisse</div>';
+                    return;
+                }
+                box.innerHTML = results.map((s, i) =>
+                    '<div class="search-result" data-idx="' + i + '">' + escHtml(s.name) + '</div>'
                 ).join('');
+                box.querySelectorAll('.search-result[data-idx]').forEach(el => {
+                    const hit = results[el.dataset.idx];
+                    el.onclick = () => addStation(hit.id, hit.name);
+                });
             } catch(e) {
                 document.getElementById('search-loading').classList.add('hidden');
-                document.getElementById('search-results').innerHTML = '<div class="search-result">Fehler</div>';
+                box.innerHTML = '<div class="search-result">' + escHtml(e.message || 'Fehler') + '</div>';
             }
         }, 400);
     }
@@ -422,10 +473,6 @@ String getPortalHTML() {
                 body: 'id=' + encodeURIComponent(id) + '&walk_time=' + encodeURIComponent(val)
             });
         } catch(e) {}
-    }
-
-    async function saveDepCount(val) {
-        await saveSetting('dep_count', val);
     }
 
     async function saveSetting(key, val) {
@@ -552,10 +599,15 @@ String getPortalHTML() {
         infoEl.classList.add('hidden');
         statusEl.innerHTML = '<div class="msg" style="color:#888;">Suche nach Updates...</div>';
         try {
-            const r = await fetch('/api/firmware/check');
-            const data = await r.json();
-            if (data.error) {
-                statusEl.innerHTML = '<div class="msg msg-error">' + escHtml(data.error) + '</div>';
+            const start = await fetch('/api/firmware/check');
+            if (!start.ok) {
+                const err = await start.json().catch(() => ({}));
+                statusEl.innerHTML = '<div class="msg msg-error">' + escHtml(err.error || 'Fehler') + '</div>';
+                return;
+            }
+            const data = await pollJob();
+            if (!data) {
+                statusEl.innerHTML = '<div class="msg msg-error">Keine Antwort von GitHub</div>';
                 return;
             }
             if (data.update_available && data.download_url) {
@@ -666,4 +718,3 @@ String getPortalHTML() {
 </body>
 </html>
 )rawhtml";
-}

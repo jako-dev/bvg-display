@@ -4,20 +4,28 @@
 (() => {
     'use strict';
 
+    // ===== Constants =====
+    const STORAGE_KEY = 'bvg-display-state';
+    const LOOKAHEAD_MINUTES = 30;   // How far ahead to ask the API for departures
+    const MAX_API_RESULTS = 40;     // Upper bound when over-fetching for walk time
+    const LED_MAX_MERGED = 30;      // Cap on merged departures in LED view
+    const MAX_ALERTS = 3;
+    const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
+    const SEARCH_DEBOUNCE_MS = 300;
+
     // ===== State =====
     const state = {
         stations: [],           // Saved stations [{id, name, walkTime}]
         activeStationId: null,  // Currently displayed station
-        departures: [],         // Current departure data
-        departureCount: 6,      // Number of departures to fetch
+        departureCount: 6,      // Number of departures to show
         refreshInterval: 30,    // Seconds between refreshes
         refreshTimer: null,
         theme: 'dark',
-        viewMode: 'single',     // 'single' or 'split'
+        viewMode: 'single',     // 'single' | 'split' | 'led'
         kioskMode: false,
         ledScrollEnabled: true, // Scroll through departures in LED mode
         ledScrollSpeed: 3000,   // ms between scroll steps
-        apiProvider: 'v6.bvg.transport.rest',  // API host
+        apiProvider: BvgApi.DEFAULT_PROVIDER,
         filters: {
             suburban: true,
             subway: true,
@@ -28,6 +36,11 @@
             regional: true
         }
     };
+
+    // Incremented on every user action that changes what should be on screen.
+    // A response tagged with an older token is stale and gets dropped, so a slow
+    // request for a previous station can't overwrite the current one.
+    let requestToken = 0;
 
     // ===== DOM References =====
     const dom = {
@@ -42,9 +55,11 @@
         departuresList: document.getElementById('departures-list'),
         loadingIndicator: document.getElementById('loading-indicator'),
         noStationMsg: document.getElementById('no-station-msg'),
+        boardMessage: document.getElementById('board-message'),
         currentStationName: document.getElementById('current-station-name'),
         clock: document.getElementById('clock'),
         lastUpdate: document.getElementById('last-update'),
+        dataSource: document.getElementById('data-source'),
         realtimeIndicator: document.getElementById('realtime-indicator'),
         alertsBanner: document.getElementById('alerts-banner'),
         apiProviderSelect: document.getElementById('api-provider'),
@@ -61,7 +76,6 @@
         splitDeparturesRight: document.getElementById('split-departures-right'),
         splitHeaderLeft: document.getElementById('split-header-left'),
         splitHeaderRight: document.getElementById('split-header-right'),
-        splitHint: document.getElementById('split-hint'),
         // LED view
         viewLed: document.getElementById('view-led'),
         ledView: document.getElementById('led-view'),
@@ -70,9 +84,7 @@
         ledScrollSpeed: document.getElementById('led-scroll-speed'),
         // Kiosk
         kioskBtn: document.getElementById('kiosk-btn'),
-        kioskToggle: document.getElementById('kiosk-toggle'),
-        displayHeader: document.getElementById('display-header'),
-        displayFooter: document.getElementById('display-footer')
+        kioskToggle: document.getElementById('kiosk-toggle')
     };
 
     // ===== Initialization =====
@@ -82,30 +94,30 @@
         updateClock();
         setInterval(updateClock, 1000);
         applyTheme(state.theme);
-        applyViewMode(state.viewMode);
+        applyFiltersToUI();
         renderSavedStations();
         renderStationTabs();
-        applyFiltersToUI();
+        updateDataSourceLabel();
 
         if (state.kioskMode) {
             enterKioskMode(false); // restore without hint
         }
 
-        if (state.stations.length > 0) {
-            if (!state.activeStationId) {
-                state.activeStationId = state.stations[0].id;
-            }
-            showDepartures();
-        } else {
-            showNoStationMessage();
+        if (state.stations.length > 0 && !state.activeStationId) {
+            state.activeStationId = state.stations[0].id;
         }
 
-        // Pause/resume refresh on visibility change
+        // Lay the view out and load it once — applyViewMode does the initial fetch.
+        applyViewMode(state.viewMode, { persist: false });
+
+        // Pause refreshing while the tab is hidden; catch up when it returns.
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 stopRefreshTimer();
-            } else if (state.stations.length > 0) {
-                showDepartures(); // Immediate refresh + restart timer
+                LedRenderer.stopScroll();
+            } else {
+                refreshCurrentView();
+                startRefreshTimer();
             }
         });
     }
@@ -113,22 +125,23 @@
     // ===== Persistence =====
     function loadState() {
         try {
-            const saved = localStorage.getItem('bvg-display-state');
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                state.stations = parsed.stations || [];
-                state.activeStationId = parsed.activeStationId || null;
-                state.departureCount = parsed.departureCount || 6;
-                state.refreshInterval = parsed.refreshInterval || 30;
-                state.theme = parsed.theme || 'dark';
-                state.viewMode = parsed.viewMode || 'single';
-                state.kioskMode = parsed.kioskMode || false;
-                state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
-                state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
-                state.apiProvider = parsed.apiProvider || 'v6.bvg.transport.rest';
-                state.filters = { ...state.filters, ...parsed.filters };
-                BvgApi.setProvider(state.apiProvider);
-            }
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (!saved) return;
+            const parsed = JSON.parse(saved);
+            state.stations = Array.isArray(parsed.stations) ? parsed.stations : [];
+            state.activeStationId = parsed.activeStationId || null;
+            state.departureCount = parsed.departureCount || 6;
+            state.refreshInterval = clamp(parsed.refreshInterval || 30, 10, 120);
+            state.theme = parsed.theme === 'modern' ? 'modern' : 'dark';
+            state.viewMode = ['single', 'split', 'led'].includes(parsed.viewMode) ? parsed.viewMode : 'single';
+            state.kioskMode = parsed.kioskMode || false;
+            state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
+            state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
+            state.apiProvider = parsed.apiProvider || BvgApi.DEFAULT_PROVIDER;
+            state.filters = { ...state.filters, ...parsed.filters };
+            BvgApi.setProvider(state.apiProvider);
+            // setProvider ignores unknown hosts — mirror back what it accepted.
+            state.apiProvider = BvgApi.getProvider();
         } catch (e) {
             console.warn('Failed to load saved state:', e);
         }
@@ -136,7 +149,7 @@
 
     function saveState() {
         try {
-            localStorage.setItem('bvg-display-state', JSON.stringify({
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({
                 stations: state.stations,
                 activeStationId: state.activeStationId,
                 departureCount: state.departureCount,
@@ -166,11 +179,11 @@
         dom.stationSearch.addEventListener('input', (e) => {
             clearTimeout(searchTimeout);
             const query = e.target.value;
-            if (query.length < 2) {
+            if (query.trim().length < 2) {
                 dom.searchResults.classList.add('hidden');
                 return;
             }
-            searchTimeout = setTimeout(() => searchStations(query), 300);
+            searchTimeout = setTimeout(() => searchStations(query), SEARCH_DEBOUNCE_MS);
         });
 
         dom.stationSearch.addEventListener('focus', () => {
@@ -179,25 +192,68 @@
             }
         });
 
-        // Close search results when clicking outside
+        // One document-level handler for "click outside" behaviour.
+        // Registered in the capture phase on purpose: the delegated handlers
+        // below re-render their lists, which detaches the clicked node — by
+        // bubble time `settingsPanel.contains(e.target)` would be false and the
+        // panel would close every time a station is removed.
         document.addEventListener('click', (e) => {
             if (!e.target.closest('.search-wrapper')) {
                 dom.searchResults.classList.add('hidden');
             }
+            if (dom.settingsPanel.classList.contains('open') &&
+                !dom.settingsPanel.contains(e.target) &&
+                !e.target.closest('#open-settings, #open-settings-cta')) {
+                closeSettings();
+            }
+        }, true);
+
+        // Delegated handlers — the lists are re-rendered often, so binding once
+        // on the container avoids re-attaching listeners on every render.
+        dom.searchResults.addEventListener('click', (e) => {
+            const item = e.target.closest('.search-result-item[data-id]');
+            if (!item) return;
+            addStation(item.dataset.id, item.dataset.name);
+            dom.searchResults.classList.add('hidden');
+            dom.stationSearch.value = '';
+        });
+
+        dom.savedStations.addEventListener('click', (e) => {
+            const btn = e.target.closest('.btn-remove[data-id]');
+            if (btn) removeStation(btn.dataset.id);
+        });
+
+        dom.savedStations.addEventListener('change', (e) => {
+            const input = e.target.closest('.walk-time-input[data-id]');
+            if (!input) return;
+            const val = clamp(parseInt(input.value, 10) || 0, 0, 30);
+            input.value = val;
+            const station = state.stations.find(s => s.id === input.dataset.id);
+            if (station && station.walkTime !== val) {
+                station.walkTime = val;
+                saveState();
+                refreshCurrentView();
+            }
+        });
+
+        dom.stationTabs.addEventListener('click', (e) => {
+            const tab = e.target.closest('.station-tab[data-id]');
+            if (!tab || tab.dataset.id === state.activeStationId) return;
+            state.activeStationId = tab.dataset.id;
+            saveState();
+            renderStationTabs();
+            showSingleStation();
         });
 
         // Filters
-        Object.keys(state.filters).forEach(key => {
+        BvgApi.PRODUCTS.forEach(key => {
             const checkbox = document.getElementById(`filter-${key}`);
-            if (checkbox) {
-                checkbox.addEventListener('change', (e) => {
-                    state.filters[key] = e.target.checked;
-                    saveState();
-                    if (state.activeStationId) {
-                        fetchDepartures();
-                    }
-                });
-            }
+            if (!checkbox) return;
+            checkbox.addEventListener('change', (e) => {
+                state.filters[key] = e.target.checked;
+                saveState();
+                refreshCurrentView();
+            });
         });
 
         // Theme
@@ -209,26 +265,25 @@
             state.apiProvider = e.target.value;
             BvgApi.setProvider(state.apiProvider);
             saveState();
-            if (state.activeStationId) showDepartures();
+            updateDataSourceLabel();
+            refreshCurrentView();
         });
 
         // Departure count
         dom.departureCountSelect.addEventListener('change', (e) => {
-            state.departureCount = parseInt(e.target.value) || 6;
+            state.departureCount = parseInt(e.target.value, 10) || 6;
             saveState();
-            if (state.activeStationId) showDepartures();
+            refreshCurrentView();
         });
 
         // Refresh interval
         dom.refreshIntervalInput.addEventListener('change', (e) => {
-            const val = Math.max(10, Math.min(120, parseInt(e.target.value) || 30));
+            const val = clamp(parseInt(e.target.value, 10) || 30, 10, 120);
             state.refreshInterval = val;
             e.target.value = val;
             saveState();
             startRefreshTimer();
         });
-
-        // Walk time - removed (now per-station)
 
         // View mode
         dom.viewSingle.addEventListener('click', () => applyViewMode('single'));
@@ -242,43 +297,24 @@
             if (state.viewMode === 'led') fetchLedDepartures();
         });
         dom.ledScrollSpeed.addEventListener('change', (e) => {
-            state.ledScrollSpeed = parseInt(e.target.value) || 3000;
+            state.ledScrollSpeed = parseInt(e.target.value, 10) || 3000;
             saveState();
             if (state.viewMode === 'led') fetchLedDepartures();
         });
 
         // Kiosk mode
-        dom.kioskBtn.addEventListener('click', () => toggleKioskMode());
+        dom.kioskBtn.addEventListener('click', toggleKioskMode);
         dom.kioskToggle.addEventListener('change', (e) => {
-            if (e.target.checked) {
-                enterKioskMode(true);
-            } else {
-                exitKioskMode();
-            }
+            if (e.target.checked) enterKioskMode(true);
+            else exitKioskMode();
         });
 
-        // Kiosk exit: Escape key
+        // Kiosk exit: Escape key or double-click outside the settings panel
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && state.kioskMode) {
-                exitKioskMode();
-            }
+            if (e.key === 'Escape' && state.kioskMode) exitKioskMode();
         });
-
-        // Kiosk exit: double-click
-        document.addEventListener('dblclick', () => {
-            if (state.kioskMode) {
-                exitKioskMode();
-            }
-        });
-
-        // Settings overlay click to close
-        document.addEventListener('click', (e) => {
-            if (dom.settingsPanel.classList.contains('open') &&
-                !dom.settingsPanel.contains(e.target) &&
-                e.target !== dom.openSettings &&
-                e.target !== dom.openSettingsCta) {
-                closeSettings();
-            }
+        document.addEventListener('dblclick', (e) => {
+            if (state.kioskMode && !e.target.closest('#settings-panel')) exitKioskMode();
         });
     }
 
@@ -302,8 +338,7 @@
 
     // ===== Clock =====
     function updateClock() {
-        const now = new Date();
-        dom.clock.textContent = now.toLocaleTimeString('de-DE', {
+        dom.clock.textContent = new Date().toLocaleTimeString('de-DE', {
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit'
@@ -313,8 +348,7 @@
     // ===== Station Search =====
     async function searchStations(query) {
         try {
-            const results = await BvgApi.searchStations(query);
-            renderSearchResults(results);
+            renderSearchResults(await BvgApi.searchStations(query));
         } catch (e) {
             console.error('Search failed:', e);
             dom.searchResults.innerHTML = '<div class="search-result-item">Fehler bei der Suche</div>';
@@ -325,55 +359,48 @@
     function renderSearchResults(results) {
         if (results.length === 0) {
             dom.searchResults.innerHTML = '<div class="search-result-item">Keine Ergebnisse</div>';
-            dom.searchResults.classList.remove('hidden');
-            return;
-        }
-
-        dom.searchResults.innerHTML = results.map(stop => {
-            const products = getProductBadges(stop.products);
-            return `
-                <div class="search-result-item" data-id="${stop.id}" data-name="${escapeHtml(stop.name)}">
+        } else {
+            dom.searchResults.innerHTML = results.map(stop => `
+                <div class="search-result-item" data-id="${escapeHtml(stop.id)}" data-name="${escapeHtml(stop.name)}">
                     <div>${escapeHtml(stop.name)}</div>
-                    <div class="result-products">${products}</div>
+                    <div class="result-products">${getProductBadges(stop.products)}</div>
                 </div>
-            `;
-        }).join('');
-
-        // Add click handlers
-        dom.searchResults.querySelectorAll('.search-result-item[data-id]').forEach(item => {
-            item.addEventListener('click', () => {
-                addStation(item.dataset.id, item.dataset.name);
-                dom.searchResults.classList.add('hidden');
-                dom.stationSearch.value = '';
-            });
-        });
-
+            `).join('');
+        }
         dom.searchResults.classList.remove('hidden');
     }
 
+    const PRODUCT_BADGES = {
+        suburban: ['badge-suburban', 'S'],
+        subway: ['badge-subway', 'U'],
+        tram: ['badge-tram', 'T'],
+        bus: ['badge-bus', 'B'],
+        ferry: ['badge-ferry', 'F'],
+        express: ['badge-express', 'IC'],
+        regional: ['badge-regional', 'RE']
+    };
+
     function getProductBadges(products) {
         if (!products) return '';
-        const badges = [];
-        if (products.suburban) badges.push('<span class="badge badge-suburban">S</span>');
-        if (products.subway) badges.push('<span class="badge badge-subway">U</span>');
-        if (products.tram) badges.push('<span class="badge badge-tram">T</span>');
-        if (products.bus) badges.push('<span class="badge badge-bus">B</span>');
-        if (products.ferry) badges.push('<span class="badge badge-ferry">F</span>');
-        if (products.express) badges.push('<span class="badge badge-express">IC</span>');
-        if (products.regional) badges.push('<span class="badge badge-regional">RE</span>');
-        return badges.join('');
+        return BvgApi.PRODUCTS
+            .filter(key => products[key])
+            .map(key => {
+                const [cls, label] = PRODUCT_BADGES[key];
+                return `<span class="badge ${cls}">${label}</span>`;
+            })
+            .join('');
     }
 
     // ===== Station Management =====
     function addStation(id, name) {
-        if (state.stations.find(s => s.id === id)) return; // Already added
+        if (state.stations.some(s => s.id === id)) return; // Already added
         state.stations.push({ id, name, walkTime: 0 });
         state.activeStationId = id;
         saveState();
         renderSavedStations();
         renderStationTabs();
-        showDepartures();
         closeSettings();
+        refreshCurrentView();
     }
 
     function removeStation(id) {
@@ -384,54 +411,31 @@
         saveState();
         renderSavedStations();
         renderStationTabs();
-
-        if (state.viewMode === 'split') {
-            fetchSplitDepartures();
-        } else if (state.viewMode === 'led') {
-            fetchLedDepartures();
-        } else if (state.activeStationId) {
-            showDepartures();
-        } else {
-            showNoStationMessage();
-        }
+        refreshCurrentView();
     }
 
     function renderSavedStations() {
         if (state.stations.length === 0) {
-            dom.savedStations.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Noch keine Stationen gespeichert.</p>';
+            dom.savedStations.innerHTML = '<p class="empty-hint">Noch keine Stationen gespeichert.</p>';
             return;
         }
 
         dom.savedStations.innerHTML = state.stations.map(station => `
             <div class="saved-station">
                 <span class="station-info">${escapeHtml(station.name)}</span>
-                <input type="number" class="walk-time-input" data-id="${station.id}" 
-                       min="0" max="30" value="${station.walkTime || 0}" 
-                       title="Fu\u00dfweg (Minuten)" style="width: 50px; text-align: center;">
-                <span style="font-size: 0.7rem; color: var(--text-muted);">min</span>
-                <button class="btn-remove" data-id="${station.id}" title="Entfernen">&times;</button>
+                <input type="number" class="walk-time-input" data-id="${escapeHtml(station.id)}"
+                       min="0" max="30" value="${station.walkTime || 0}"
+                       aria-label="Fußweg zu ${escapeHtml(station.name)} in Minuten"
+                       title="Fußweg (Minuten)">
+                <span class="walk-time-unit">min</span>
+                <button class="btn-remove" data-id="${escapeHtml(station.id)}"
+                        aria-label="${escapeHtml(station.name)} entfernen" title="Entfernen">&times;</button>
             </div>
         `).join('');
-
-        dom.savedStations.querySelectorAll('.btn-remove').forEach(btn => {
-            btn.addEventListener('click', () => removeStation(btn.dataset.id));
-        });
-        dom.savedStations.querySelectorAll('.walk-time-input').forEach(input => {
-            input.addEventListener('change', (e) => {
-                const id = e.target.dataset.id;
-                const val = Math.max(0, Math.min(30, parseInt(e.target.value) || 0));
-                const station = state.stations.find(s => s.id === id);
-                if (station) {
-                    station.walkTime = val;
-                    saveState();
-                    if (state.activeStationId) showDepartures();
-                }
-            });
-        });
     }
 
     function renderStationTabs() {
-        if (state.stations.length <= 1) {
+        if (state.stations.length <= 1 || state.viewMode !== 'single') {
             dom.stationTabs.classList.add('hidden');
             return;
         }
@@ -439,234 +443,243 @@
         dom.stationTabs.classList.remove('hidden');
         dom.stationTabs.innerHTML = state.stations.map(station => `
             <button class="station-tab ${station.id === state.activeStationId ? 'active' : ''}"
-                    data-id="${station.id}">
+                    data-id="${escapeHtml(station.id)}">
                 ${escapeHtml(station.name)}
             </button>
         `).join('');
-
-        dom.stationTabs.querySelectorAll('.station-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                state.activeStationId = tab.dataset.id;
-                saveState();
-                renderStationTabs();
-                showDepartures();
-            });
-        });
     }
 
-    // ===== Departures Display =====
+    // ===== Board State Helpers =====
+    function showBoardMessage(html) {
+        dom.boardMessage.innerHTML = html;
+        dom.boardMessage.classList.remove('hidden');
+    }
+
+    function clearBoardMessage() {
+        dom.boardMessage.classList.add('hidden');
+        dom.boardMessage.innerHTML = '';
+    }
+
     function showNoStationMessage() {
         dom.loadingIndicator.classList.add('hidden');
+        clearBoardMessage();
         dom.noStationMsg.classList.remove('hidden');
         dom.currentStationName.textContent = 'BVG Abfahrtsmonitor';
         dom.alertsBanner.classList.add('hidden');
-        clearDepartureRows();
+        dom.departuresList.innerHTML = '';
         stopRefreshTimer();
     }
 
-    async function showDepartures() {
-        if (state.viewMode === 'split') {
-            fetchSplitDepartures();
-            startRefreshTimer();
-            return;
-        }
-        if (state.viewMode === 'led') {
-            fetchLedDepartures();
-            startRefreshTimer();
+    // ===== Departures Display =====
+    function showSingleStation() {
+        if (!state.activeStationId) {
+            showNoStationMessage();
             return;
         }
 
         dom.noStationMsg.classList.add('hidden');
+        clearBoardMessage();
         dom.loadingIndicator.classList.remove('hidden');
-        clearDepartureRows();
+        dom.departuresList.innerHTML = '';
 
-        const station = state.stations.find(s => s.id === state.activeStationId);
-        if (station) {
-            dom.currentStationName.textContent = station.name;
-        }
+        const station = getActiveStation();
+        if (station) dom.currentStationName.textContent = station.name;
 
-        await fetchDepartures();
+        fetchDepartures();
         startRefreshTimer();
     }
 
+    function getActiveStation() {
+        return state.stations.find(s => s.id === state.activeStationId) || null;
+    }
+
+    /**
+     * How much to ask the API for. With a walk time set, the closest departures
+     * get filtered out again — so look further ahead and pull extra rows,
+     * otherwise the board ends up shorter than the user asked for.
+     */
+    function fetchParamsFor(station) {
+        const walk = (station && station.walkTime) || 0;
+        return {
+            duration: LOOKAHEAD_MINUTES + walk,
+            results: walk > 0
+                ? Math.min(MAX_API_RESULTS, state.departureCount * 2 + 4)
+                : state.departureCount
+        };
+    }
+
+    async function loadStationDepartures(station) {
+        const { duration, results } = fetchParamsFor(station);
+        const data = await BvgApi.getDepartures(station.id, state.filters, duration, results);
+        const departures = filterByWalkTime(data.departures || [], station.walkTime || 0);
+        return { data, departures };
+    }
+
     async function fetchDepartures() {
-        if (!state.activeStationId) return;
+        const station = getActiveStation();
+        if (!station) return;
+
+        const token = ++requestToken;
 
         try {
-            const data = await BvgApi.getDepartures(state.activeStationId, state.filters, 30, state.departureCount);
+            const { data, departures } = await loadStationDepartures(station);
+            if (token !== requestToken) return; // superseded by a newer request
+
             dom.loadingIndicator.classList.add('hidden');
 
-            if (data.departures && data.departures.length > 0) {
-                state.departures = data.departures;
-                const activeStation = state.stations.find(s => s.id === state.activeStationId);
-                const filtered = filterByWalkTime(data.departures, activeStation ? activeStation.walkTime : 0);
-                renderDepartures(filtered);
-                renderAlerts(data.departures);
+            const visible = departures.slice(0, state.departureCount);
+            renderDepartures(visible);
+            renderAlerts(data.departures || []);
+
+            if (visible.length === 0) {
+                showBoardMessage(`<p>Keine Abfahrten in den nächsten ${fetchParamsFor(station).duration} Minuten.</p>`);
             } else {
-                dom.departuresList.innerHTML = `
-                    <div class="loading">
-                        <p>Keine Abfahrten in den nächsten 30 Minuten.</p>
-                    </div>
-                `;
+                clearBoardMessage();
             }
 
-            // Update realtime indicator
-            if (data.realtimeDataUpdatedAt) {
-                dom.realtimeIndicator.style.color = 'var(--on-time-color)';
-                dom.realtimeIndicator.title = 'Echtzeitdaten verfügbar';
-            } else {
-                dom.realtimeIndicator.style.color = 'var(--text-muted)';
-                dom.realtimeIndicator.title = 'Keine Echtzeitdaten';
-            }
-
-            // Update last refresh time
-            const now = new Date();
-            dom.lastUpdate.textContent = `Letzte Aktualisierung: ${now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
-
+            updateRealtimeIndicator(data.realtimeDataUpdatedAt);
+            updateLastRefreshTime();
         } catch (e) {
+            if (token !== requestToken) return;
             console.error('Failed to fetch departures:', e);
             dom.loadingIndicator.classList.add('hidden');
-            dom.departuresList.innerHTML = `
-                <div class="loading">
-                    <p style="color: var(--delay-color);">Fehler beim Laden der Abfahrten.</p>
-                    <p style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(e.message)}</p>
-                </div>
-            `;
+            dom.departuresList.innerHTML = '';
+            dom.alertsBanner.classList.add('hidden');
+            showBoardMessage(`
+                <p class="error-text">Fehler beim Laden der Abfahrten.</p>
+                <p class="error-detail">${escapeHtml(e.message)}</p>
+            `);
         }
     }
 
     function filterByWalkTime(departures, walkTime) {
         if (!walkTime || walkTime <= 0) return departures;
-        const now = new Date();
+        const now = Date.now();
         return departures.filter(dep => {
-            const when = dep.when ? new Date(dep.when) : (dep.plannedWhen ? new Date(dep.plannedWhen) : null);
+            const when = departureDate(dep);
             if (!when) return true;
-            const diffMin = (when - now) / 60000;
-            return diffMin >= walkTime;
+            return (when - now) / 60000 >= walkTime;
         });
     }
 
+    /** Realtime time if available, otherwise the scheduled one */
+    function departureDate(dep) {
+        const raw = dep.when || dep.plannedWhen;
+        if (!raw) return null;
+        const parsed = new Date(raw);
+        return isNaN(parsed) ? null : parsed;
+    }
+
+    function departureRowHtml(dep) {
+        const line = dep.line || {};
+        const lineName = line.name || '?';
+        const lineProduct = line.product || '';
+        const lineClass = getLineClass(line);
+        const platform = dep.platform || dep.plannedPlatform || '';
+        const timeInfo = formatDepartureTime(dep);
+
+        let rowClass = 'departure-row';
+        if (dep.cancelled === true) rowClass += ' cancelled';
+        else if (dep.delay > DELAY_THRESHOLD_SEC) rowClass += ' delayed';
+
+        return `
+            <div class="${rowClass}">
+                <span class="col-line">
+                    <span class="line-badge ${escapeHtml(lineProduct)} ${lineClass}">${escapeHtml(lineName)}</span>
+                </span>
+                <span class="col-destination">${escapeHtml(dep.direction || 'Unbekannt')}</span>
+                <span class="col-platform">${escapeHtml(platform)}</span>
+                <span class="col-departure">${timeInfo.main}${timeInfo.sub}</span>
+            </div>
+        `;
+    }
+
     function renderDepartures(departures) {
-        const rows = departures.map(dep => {
-            const lineName = dep.line ? dep.line.name : '?';
-            const lineProduct = dep.line ? dep.line.product : '';
-            const lineClass = getLineClass(dep.line);
-            const direction = dep.direction || 'Unbekannt';
-            const platform = dep.platform || dep.plannedPlatform || '';
-            const timeInfo = formatDepartureTime(dep);
-            const isCancelled = dep.cancelled === true;
-            const isDelayed = dep.delay && dep.delay > 60; // more than 1 min delay
-
-            let rowClass = 'departure-row';
-            if (isCancelled) rowClass += ' cancelled';
-            else if (isDelayed) rowClass += ' delayed';
-
-            return `
-                <div class="${rowClass}">
-                    <span class="col-line">
-                        <span class="line-badge ${lineProduct} ${lineClass}">${escapeHtml(lineName)}</span>
-                    </span>
-                    <span class="col-destination">${escapeHtml(direction)}</span>
-                    <span class="col-platform">${escapeHtml(platform)}</span>
-                    <span class="col-departure">
-                        ${timeInfo.main}
-                        ${timeInfo.sub}
-                    </span>
-                </div>
-            `;
-        }).join('');
-
-        dom.departuresList.innerHTML = rows;
+        dom.departuresList.innerHTML = departures.map(departureRowHtml).join('');
     }
 
     function getLineClass(line) {
         if (!line || !line.name) return '';
         const name = line.name.toLowerCase().replace(/\s/g, '');
         // Match specific line names like u1, u2, s1, s41, etc.
-        if (/^[us]\d+$/.test(name)) return name;
-        return '';
+        return /^[us]\d+$/.test(name) ? name : '';
     }
 
     function formatDepartureTime(dep) {
-        const now = new Date();
-        const when = dep.when ? new Date(dep.when) : null;
-        const plannedWhen = dep.plannedWhen ? new Date(dep.plannedWhen) : null;
-        const isCancelled = dep.cancelled === true;
-
-        if (isCancelled) {
-            return { main: '<span style="color: var(--cancelled-color);">Fällt aus</span>', sub: '' };
+        if (dep.cancelled === true) {
+            return { main: '<span class="cancelled-text">Fällt aus</span>', sub: '' };
         }
 
-        if (!when && !plannedWhen) {
-            return { main: '?', sub: '' };
-        }
+        const departureTime = departureDate(dep);
+        if (!departureTime) return { main: '?', sub: '' };
 
-        const departureTime = when || plannedWhen;
-        const diffMs = departureTime - now;
-        const diffMin = Math.round(diffMs / 60000);
+        const diffMin = Math.round((departureTime - Date.now()) / 60000);
 
         let main;
         if (diffMin <= 0) {
-            main = '<span style="color: var(--on-time-color);">jetzt</span>';
-        } else if (diffMin === 1) {
-            main = '1 min';
+            main = '<span class="now-text">jetzt</span>';
         } else if (diffMin < 60) {
             main = `${diffMin} min`;
         } else {
             main = departureTime.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
         }
 
-        // Delay info
+        // Delay info (delay is in seconds)
         let sub = '';
-        const delay = dep.delay; // in seconds
-        if (delay && delay > 60) {
-            const delayMin = Math.round(delay / 60);
-            sub = `<span class="delay-info">+${delayMin} min</span>`;
-        } else if (delay !== null && delay !== undefined && delay <= 60 && when) {
-            sub = `<span class="on-time">pünktlich</span>`;
+        const delay = dep.delay;
+        if (delay > DELAY_THRESHOLD_SEC) {
+            sub = `<span class="delay-info">+${Math.round(delay / 60)} min</span>`;
+        } else if (delay !== null && delay !== undefined && dep.when) {
+            sub = '<span class="on-time">pünktlich</span>';
         }
 
         return { main, sub };
+    }
+
+    function updateRealtimeIndicator(hasRealtime) {
+        dom.realtimeIndicator.classList.toggle('is-live', !!hasRealtime);
+        dom.realtimeIndicator.title = hasRealtime ? 'Echtzeitdaten verfügbar' : 'Keine Echtzeitdaten';
+    }
+
+    function updateLastRefreshTime() {
+        const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        dom.lastUpdate.textContent = `Letzte Aktualisierung: ${now}`;
+    }
+
+    function updateDataSourceLabel() {
+        const providers = BvgApi.getProviders();
+        dom.dataSource.textContent = `Daten: ${providers[BvgApi.getProvider()] || 'BVG / VBB'}`;
     }
 
     // ===== Alerts/Remarks =====
     function renderAlerts(departures) {
         const remarks = new Map(); // deduplicate by text
         departures.forEach(dep => {
-            if (dep.remarks) {
-                dep.remarks.forEach(remark => {
-                    if (remark.type === 'warning' || remark.type === 'status') {
-                        const text = remark.text || remark.summary;
-                        if (text && !remarks.has(text)) {
-                            remarks.set(text, remark);
-                        }
-                    }
-                });
-            }
+            (dep.remarks || []).forEach(remark => {
+                if (remark.type !== 'warning' && remark.type !== 'status') return;
+                const text = remark.text || remark.summary;
+                if (text && !remarks.has(text)) remarks.set(text, text);
+            });
         });
 
         if (remarks.size === 0) {
             dom.alertsBanner.classList.add('hidden');
+            dom.alertsBanner.innerHTML = '';
             return;
         }
 
-        // Show max 3 alerts
-        const alertItems = Array.from(remarks.values()).slice(0, 3).map(remark => {
-            const text = remark.text || remark.summary || '';
-            return `<div class="alert-item"><span>${escapeHtml(text)}</span></div>`;
-        }).join('');
-
-        dom.alertsBanner.innerHTML = alertItems;
+        dom.alertsBanner.innerHTML = Array.from(remarks.values())
+            .slice(0, MAX_ALERTS)
+            .map(text => `<div class="alert-item"><span>${escapeHtml(text)}</span></div>`)
+            .join('');
         dom.alertsBanner.classList.remove('hidden');
     }
 
     // ===== Filters =====
     function applyFiltersToUI() {
-        Object.keys(state.filters).forEach(key => {
+        BvgApi.PRODUCTS.forEach(key => {
             const checkbox = document.getElementById(`filter-${key}`);
-            if (checkbox) {
-                checkbox.checked = state.filters[key];
-            }
+            if (checkbox) checkbox.checked = state.filters[key];
         });
         dom.departureCountSelect.value = state.departureCount;
         dom.refreshIntervalInput.value = state.refreshInterval;
@@ -674,23 +687,13 @@
         dom.kioskToggle.checked = state.kioskMode;
         dom.ledScrollToggle.checked = state.ledScrollEnabled;
         dom.ledScrollSpeed.value = state.ledScrollSpeed;
-        dom.viewSingle.classList.toggle('active', state.viewMode === 'single');
-        dom.viewSplit.classList.toggle('active', state.viewMode === 'split');
-        dom.viewLed.classList.toggle('active', state.viewMode === 'led');
     }
 
     // ===== Refresh Timer =====
     function startRefreshTimer() {
         stopRefreshTimer();
-        state.refreshTimer = setInterval(() => {
-            if (state.viewMode === 'split') {
-                fetchSplitDepartures();
-            } else if (state.viewMode === 'led') {
-                fetchLedDepartures();
-            } else {
-                fetchDepartures();
-            }
-        }, state.refreshInterval * 1000);
+        if (state.stations.length === 0) return;
+        state.refreshTimer = setInterval(refreshCurrentView, state.refreshInterval * 1000);
     }
 
     function stopRefreshTimer() {
@@ -700,8 +703,21 @@
         }
     }
 
+    /** Reload whatever the active view is showing */
+    function refreshCurrentView() {
+        if (state.viewMode === 'split') {
+            fetchSplitDepartures();
+        } else if (state.viewMode === 'led') {
+            fetchLedDepartures();
+        } else if (state.activeStationId) {
+            fetchDepartures();
+        } else {
+            showNoStationMessage();
+        }
+    }
+
     // ===== View Mode =====
-    function applyViewMode(mode) {
+    function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
         dom.viewSingle.classList.toggle('active', mode === 'single');
         dom.viewSplit.classList.toggle('active', mode === 'split');
@@ -714,67 +730,69 @@
         dom.stationTabs.classList.add('hidden');
         dom.alertsBanner.classList.add('hidden');
 
+        // The LED scroll timer keeps redrawing an off-screen canvas otherwise.
+        if (mode !== 'led') LedRenderer.stopScroll();
+
         if (mode === 'split') {
             dom.splitView.classList.remove('hidden');
             dom.currentStationName.textContent = 'BVG Abfahrtsmonitor';
             fetchSplitDepartures();
+            startRefreshTimer();
         } else if (mode === 'led') {
             dom.ledView.classList.remove('hidden');
             dom.currentStationName.textContent = 'LED-Panel Emulation';
             LedRenderer.init(dom.ledCanvas);
             fetchLedDepartures();
+            startRefreshTimer();
         } else {
             dom.singleView.classList.remove('hidden');
             renderStationTabs();
-            if (state.activeStationId) {
-                const station = state.stations.find(s => s.id === state.activeStationId);
-                if (station) dom.currentStationName.textContent = station.name;
-            }
+            showSingleStation();
         }
-        saveState();
-        startRefreshTimer();
+
+        if (persist) saveState();
     }
 
     async function fetchLedDepartures() {
         if (state.stations.length === 0) {
-            LedRenderer.clear();
+            LedRenderer.stopScroll();
+            LedRenderer.render([]);
             return;
         }
 
+        const token = ++requestToken;
+
         try {
-            // Fetch from all stations and merge, filtering by per-station walk time
-            const fetches = state.stations.map(s =>
-                BvgApi.getDepartures(s.id, state.filters, 30, state.departureCount)
-                    .then(data => filterByWalkTime(data.departures || [], s.walkTime || 0))
-                    .catch(() => [])
-            );
-            const results = await Promise.all(fetches);
-            const allDepartures = results.flat();
+            // Fetch every station, filter each by its own walk time, then merge.
+            // A single failing station must not blank the whole panel.
+            const results = await Promise.all(state.stations.map(station =>
+                loadStationDepartures(station)
+                    .then(res => res.departures.slice(0, state.departureCount))
+                    .catch(e => {
+                        console.warn(`LED fetch failed for ${station.name}:`, e);
+                        return [];
+                    })
+            ));
+            if (token !== requestToken) return;
 
-            // Sort by departure time (soonest first)
-            const now = new Date();
-            allDepartures.sort((a, b) => {
-                const timeA = new Date(a.when || a.plannedWhen || 0);
-                const timeB = new Date(b.when || b.plannedWhen || 0);
-                return timeA - timeB;
-            });
+            const allDepartures = results
+                .flat()
+                .sort((a, b) => (departureDate(a) || 0) - (departureDate(b) || 0))
+                .slice(0, LED_MAX_MERGED);
 
-            if (allDepartures.length > 0) {
-                if (state.ledScrollEnabled) {
-                    LedRenderer.startScroll(allDepartures, state.ledScrollSpeed);
-                } else {
-                    LedRenderer.stopScroll();
-                    LedRenderer.render(allDepartures.slice(0, 3));
-                }
+            if (state.ledScrollEnabled) {
+                LedRenderer.startScroll(allDepartures, state.ledScrollSpeed);
             } else {
-                LedRenderer.render([]);
+                LedRenderer.stopScroll();
+                LedRenderer.render(allDepartures.slice(0, 3));
             }
 
-            const updateTime = new Date();
-            dom.lastUpdate.textContent = `Letzte Aktualisierung: ${updateTime.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
+            updateLastRefreshTime();
         } catch (e) {
+            if (token !== requestToken) return;
             console.error('LED fetch failed:', e);
-            LedRenderer.clear();
+            LedRenderer.stopScroll();
+            LedRenderer.render([]);
         }
     }
 
@@ -787,78 +805,43 @@
             return;
         }
 
-        const leftStation = state.stations[0];
-        const rightStation = state.stations[1];
+        const [leftStation, rightStation] = state.stations;
         dom.splitHeaderLeft.textContent = leftStation.name;
         dom.splitHeaderRight.textContent = rightStation.name;
 
+        const token = ++requestToken;
+
         try {
-            const [leftData, rightData] = await Promise.all([
-                BvgApi.getDepartures(leftStation.id, state.filters, 30, state.departureCount),
-                BvgApi.getDepartures(rightStation.id, state.filters, 30, state.departureCount)
+            const [left, right] = await Promise.all([
+                loadStationDepartures(leftStation),
+                loadStationDepartures(rightStation)
             ]);
+            if (token !== requestToken) return;
 
-            const leftFiltered = filterByWalkTime(leftData.departures || [], leftStation.walkTime || 0);
-            const rightFiltered = filterByWalkTime(rightData.departures || [], rightStation.walkTime || 0);
-            renderSplitPane(dom.splitDeparturesLeft, leftFiltered);
-            renderSplitPane(dom.splitDeparturesRight, rightFiltered);
+            renderSplitPane(dom.splitDeparturesLeft, left.departures.slice(0, state.departureCount));
+            renderSplitPane(dom.splitDeparturesRight, right.departures.slice(0, state.departureCount));
 
-            // Update last refresh time
-            const now = new Date();
-            dom.lastUpdate.textContent = `Letzte Aktualisierung: ${now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}`;
-
-            // Realtime indicator
-            if (leftData.realtimeDataUpdatedAt || rightData.realtimeDataUpdatedAt) {
-                dom.realtimeIndicator.style.color = 'var(--on-time-color)';
-            }
+            updateRealtimeIndicator(left.data.realtimeDataUpdatedAt || right.data.realtimeDataUpdatedAt);
+            updateLastRefreshTime();
         } catch (e) {
+            if (token !== requestToken) return;
             console.error('Split view fetch failed:', e);
+            const msg = `<div class="loading"><p class="error-text">${escapeHtml(e.message)}</p></div>`;
+            dom.splitDeparturesLeft.innerHTML = msg;
+            dom.splitDeparturesRight.innerHTML = msg;
         }
     }
 
     function renderSplitPane(container, departures) {
-        if (departures.length === 0) {
-            container.innerHTML = '<div class="loading"><p>Keine Abfahrten.</p></div>';
-            return;
-        }
-
-        container.innerHTML = departures.map(dep => {
-            const lineName = dep.line ? dep.line.name : '?';
-            const lineProduct = dep.line ? dep.line.product : '';
-            const lineClass = getLineClass(dep.line);
-            const direction = dep.direction || 'Unbekannt';
-            const platform = dep.platform || dep.plannedPlatform || '';
-            const timeInfo = formatDepartureTime(dep);
-            const isCancelled = dep.cancelled === true;
-            const isDelayed = dep.delay && dep.delay > 60;
-
-            let rowClass = 'departure-row';
-            if (isCancelled) rowClass += ' cancelled';
-            else if (isDelayed) rowClass += ' delayed';
-
-            return `
-                <div class="${rowClass}">
-                    <span class="col-line">
-                        <span class="line-badge ${lineProduct} ${lineClass}">${escapeHtml(lineName)}</span>
-                    </span>
-                    <span class="col-destination">${escapeHtml(direction)}</span>
-                    <span class="col-platform">${escapeHtml(platform)}</span>
-                    <span class="col-departure">
-                        ${timeInfo.main}
-                        ${timeInfo.sub}
-                    </span>
-                </div>
-            `;
-        }).join('');
+        container.innerHTML = departures.length === 0
+            ? '<div class="loading"><p>Keine Abfahrten.</p></div>'
+            : departures.map(departureRowHtml).join('');
     }
 
     // ===== Kiosk Mode =====
     function toggleKioskMode() {
-        if (state.kioskMode) {
-            exitKioskMode();
-        } else {
-            enterKioskMode(true);
-        }
+        if (state.kioskMode) exitKioskMode();
+        else enterKioskMode(true);
     }
 
     function enterKioskMode(showHint) {
@@ -868,7 +851,7 @@
         saveState();
         closeSettings();
 
-        // Request fullscreen
+        // Request fullscreen (may be rejected without a user gesture — that's fine)
         const elem = document.documentElement;
         if (elem.requestFullscreen) {
             elem.requestFullscreen().catch(() => {});
@@ -876,10 +859,7 @@
             elem.webkitRequestFullscreen();
         }
 
-        // Show exit hint briefly
-        if (showHint) {
-            showKioskHint();
-        }
+        if (showHint) showKioskHint();
     }
 
     function exitKioskMode() {
@@ -888,14 +868,12 @@
         dom.kioskToggle.checked = false;
         saveState();
 
-        // Exit fullscreen
         if (document.fullscreenElement) {
             document.exitFullscreen().catch(() => {});
         } else if (document.webkitFullscreenElement) {
             document.webkitExitFullscreen();
         }
 
-        // Remove hint if present
         const hint = document.querySelector('.kiosk-exit-hint');
         if (hint) hint.remove();
     }
@@ -917,16 +895,20 @@
     }
 
     // ===== Utilities =====
-    function clearDepartureRows() {
-        const rows = dom.departuresList.querySelectorAll('.departure-row');
-        rows.forEach(row => row.remove());
+    function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
     }
 
+    const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+    /**
+     * Escape for both text content and quoted attribute values. Quotes matter:
+     * station names go into data-* attributes, and the textContent/innerHTML
+     * trick this used to rely on leaves " and ' untouched.
+     */
     function escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
+        if (str === null || str === undefined) return '';
+        return String(str).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
     }
 
     // ===== Start =====

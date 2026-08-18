@@ -3,6 +3,21 @@ name: Build & Release Firmware
 on:
   release:
     types: [published]
+  # Also build on every change to the firmware so a broken build is caught
+  # before a release is cut, not during one.
+  push:
+    branches: [main]
+    paths:
+      - 'esp32/**'
+      - '.github/workflows/build-firmware.yml'
+  pull_request:
+    paths:
+      - 'esp32/**'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to attach the .bin to a release
 
 jobs:
   build:
@@ -15,16 +30,34 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('esp32/platformio.ini') }}
+          restore-keys: ${{ runner.os }}-pio-
+
       - name: Install PlatformIO
-        run: pip install platformio
+        run: pip install --upgrade platformio
 
       - name: Build firmware
-        run: cd esp32 && pio run -e esp32dev
+        run: pio run -e esp32dev
+        working-directory: esp32
 
       - name: Rename firmware binary
         run: cp esp32/.pio/build/esp32dev/firmware.bin bvg-display.bin
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bvg-display-firmware
+          path: bvg-display.bin
+          if-no-files-found: error
+
       - name: Upload firmware to release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: bvg-display.bin
