@@ -8,11 +8,15 @@ const LedRenderer = (() => {
 
     const WIDTH = 128;
     const HEIGHT = 32;
+    const ROW_HEIGHT = 10;
+    const MAX_ROWS = 3;
+    const CHAR_WIDTH = 6;  // 5px glyph + 1px gap
+
     let canvas = null;
     let ctx = null;
-    let scrollOffset = 0;
+    let frame = null;   // ImageData backing buffer
+    let pixels = null;  // frame.data (RGBA)
     let scrollTimer = null;
-    let currentDepartures = [];
 
     // 5x7 pixel font (subset: A-Z, 0-9, common symbols)
     // Each char is 5 columns wide, each column is 7 bits (LSB = top row)
@@ -137,46 +141,71 @@ const LedRenderer = (() => {
     };
 
     /**
-     * Initialize the renderer with a canvas element
+     * Initialize the renderer with a canvas element.
+     * Safe to call repeatedly (e.g. every time the LED view is opened).
      */
     function init(canvasElement) {
-        canvas = canvasElement;
-        ctx = canvas.getContext('2d');
-        ctx.imageSmoothingEnabled = false;
+        if (canvas !== canvasElement) {
+            canvas = canvasElement;
+            ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = false;
+            frame = ctx.createImageData(WIDTH, HEIGHT);
+            pixels = frame.data;
+            // Alpha is constant — set it once instead of on every pixel write.
+            for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+        }
         clear();
     }
 
     /**
-     * Clear the canvas to black
+     * Clear the panel to black
      */
     function clear() {
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        if (!ctx) return;
+        clearBuffer();
+        flush();
+    }
+
+    /** Zero the RGB channels of the backing buffer (alpha stays at 255) */
+    function clearBuffer() {
+        for (let i = 0; i < pixels.length; i += 4) {
+            pixels[i] = 0;
+            pixels[i + 1] = 0;
+            pixels[i + 2] = 0;
+        }
+    }
+
+    /** Push the backing buffer to the canvas — one draw call per frame */
+    function flush() {
+        ctx.putImageData(frame, 0, 0);
     }
 
     /**
-     * Set a single pixel
+     * Set a single pixel in the backing buffer
      */
     function setPixel(x, y, r, g, b) {
         if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        ctx.fillRect(x, y, 1, 1);
+        const i = (y * WIDTH + x) * 4;
+        pixels[i] = r;
+        pixels[i + 1] = g;
+        pixels[i + 2] = b;
     }
 
     /**
      * Draw a character at position, returns width drawn
      */
     function drawChar(ch, x, y, r, g, b) {
-        const glyph = FONT_5x7[ch] || FONT_5x7['?'] || [0x00, 0x00, 0x00, 0x00, 0x00];
+        const glyph = FONT_5x7[ch] || FONT_5x7['?'];
         for (let col = 0; col < 5; col++) {
             const colData = glyph[col];
+            if (!colData) continue;
             for (let row = 0; row < 7; row++) {
                 if (colData & (1 << row)) {
                     setPixel(x + col, y + row, r, g, b);
                 }
             }
         }
-        return 6; // 5px char + 1px spacing
+        return CHAR_WIDTH;
     }
 
     /**
@@ -194,15 +223,18 @@ const LedRenderer = (() => {
      * Measure string width in pixels
      */
     function measureString(str) {
-        return str.length * 6 - 1; // Each char 5px + 1px gap, minus trailing gap
+        return str.length > 0 ? str.length * CHAR_WIDTH - 1 : 0;
     }
 
     /**
      * Draw a small filled rectangle (for line badge background)
      */
     function fillRect(x, y, w, h, r, g, b) {
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        ctx.fillRect(x, y, w, h);
+        for (let py = y; py < y + h; py++) {
+            for (let px = x; px < x + w; px++) {
+                setPixel(px, py, r, g, b);
+            }
+        }
     }
 
     /**
@@ -221,22 +253,20 @@ const LedRenderer = (() => {
      * Shows up to 3 rows (row height ~10px with 1px gap)
      */
     function render(departures) {
-        currentDepartures = departures;
-        clear();
+        if (!ctx) return;
+        clearBuffer();
 
         if (!departures || departures.length === 0) {
-            drawString('Keine Abfahrten', 10, 12, 255, 204, 0);
+            const label = 'Keine Abfahrten';
+            drawString(label, Math.round((WIDTH - measureString(label)) / 2), 12, 255, 204, 0);
+            flush();
             return;
         }
 
-        const rowHeight = 10;
-        const maxRows = 3;
-        const rows = departures.slice(0, maxRows);
-
-        rows.forEach((dep, i) => {
-            const y = i * rowHeight + 1;
-            renderDepartureRow(dep, y);
+        departures.slice(0, MAX_ROWS).forEach((dep, i) => {
+            renderDepartureRow(dep, i * ROW_HEIGHT + 1);
         });
+        flush();
     }
 
     /**
@@ -250,7 +280,7 @@ const LedRenderer = (() => {
         const isCancelled = dep.cancelled === true;
 
         // Line badge (background + text)
-        const badgeWidth = lineName.length * 6 + 3;
+        const badgeWidth = lineName.length * CHAR_WIDTH + 3;
         fillRect(0, y, badgeWidth, 9, color[0], color[1], color[2]);
 
         // Line name in badge (use black if badge is bright)
@@ -260,18 +290,17 @@ const LedRenderer = (() => {
         const textB = brightness > 128 ? 0 : 255;
         drawString(lineName, 2, y + 1, textR, textG, textB);
 
-        // Time (right-aligned, draw first to know how much space it needs)
+        // Time (right-aligned, measured first so the destination knows its budget)
         const timeStr = formatLedTime(dep);
         const timeColor = getTimeColor(dep);
-        const timeWidth = timeStr.length * 6;
-        const timeX = WIDTH - timeWidth;
+        const timeX = WIDTH - measureString(timeStr) - 1;
         drawString(timeStr, timeX, y + 1, timeColor[0], timeColor[1], timeColor[2]);
 
         // Destination (between badge and time)
         const destX = badgeWidth + 2;
         const destColor = isCancelled ? [100, 100, 100] : [255, 255, 255];
         const availableWidth = timeX - destX - 2;
-        const maxChars = Math.floor(availableWidth / 6);
+        const maxChars = Math.floor(availableWidth / CHAR_WIDTH);
         let truncatedDest = direction;
         if (truncatedDest.length > maxChars) {
             truncatedDest = truncatedDest.substring(0, Math.max(0, maxChars - 1)) + '.';
@@ -317,18 +346,18 @@ const LedRenderer = (() => {
      */
     function startScroll(departures, intervalMs) {
         stopScroll();
-        if (departures.length <= 3) {
-            render(departures);
+        if (!departures || departures.length <= MAX_ROWS) {
+            render(departures || []);
             return;
         }
 
         let offset = 0;
-        render(departures.slice(0, 3));
+        render(departures.slice(0, MAX_ROWS));
 
         scrollTimer = setInterval(() => {
             offset = (offset + 1) % departures.length;
             const visible = [];
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < MAX_ROWS; i++) {
                 visible.push(departures[(offset + i) % departures.length]);
             }
             render(visible);
@@ -351,6 +380,7 @@ const LedRenderer = (() => {
         render,
         startScroll,
         stopScroll,
+        isScrolling: () => scrollTimer !== null,
         WIDTH,
         HEIGHT
     };
