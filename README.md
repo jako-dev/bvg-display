@@ -29,13 +29,16 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
-- **Views**: Single, Split (two stations side-by-side, each independently selectable), LED emulator
-- **Themes**: Classic Dark, Modern (Catppuccin)
+- **Journey planner** — from your "home" station to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays
+- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
+- **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
 - **Auto-refresh** — configurable interval (10–120s)
 - **Data source selector** — BVG or VBB
 - **Installable** — add-to-home-screen / installable as a standalone app, with the app shell cached for offline startup (live departure data always requires a connection)
 - **Offline-capable settings** — all settings persisted in localStorage
+- **Preconfigured stations** — ship default stations with the deployment (`config.json`) or pass them per URL, so a client that has never set anything up still sees a full board — see [Preconfigured Stations](#preconfigured-stations)
 
 ### Quick Start
 
@@ -45,6 +48,169 @@ Open the [live version](https://jako-dev.github.io/bvg-display/) or run locally:
 python3 -m http.server 8080
 # Open http://localhost:8080
 ```
+
+---
+
+## Preconfigured Stations
+
+By default the app is empty until the visitor adds a station, and everything is
+kept in that browser's localStorage. That does not work for a display you just
+want to *point at* — a wall tablet, a fresh browser profile, or a Home Assistant
+dashboard card, where nobody is going to open the settings panel first.
+
+Two config sources fix that. Both are optional and neither replaces the settings
+panel; they only decide what a client sees **before** it has settings of its own.
+
+Settings are layered in a fixed order, each overriding the one before it:
+
+```
+built-in defaults  →  config.json  →  localStorage  →  config.json (if "lock")  →  URL parameters
+```
+
+### 1. `config.json` — deployment defaults
+
+Edit `config.json` next to `index.html` in your deployment (or fork). Any client
+that has **not** configured its own stations starts with what is listed here:
+
+```json
+{
+  "lock": false,
+  "stations": [
+    { "id": "900100003", "name": "S+U Alexanderplatz", "walkTime": 4 },
+    { "id": "900120005" }
+  ],
+  "apiProvider": "v6.bvg.transport.rest",
+  "departureCount": 9,
+  "refreshInterval": 45,
+  "theme": "modern",
+  "viewMode": "single",
+  "kioskMode": false,
+  "filters": { "bus": false, "ferry": false }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `stations` | Default stations. `name` and `walkTime` are optional — a missing name is looked up from the API on first load |
+| `lock` | `true` makes this file win over the client's own saved settings — for dedicated wall displays that must always show the same stations |
+| `apiProvider` | `v6.bvg.transport.rest` or `v6.vbb.transport.rest` |
+| `departureCount` | 1–15 |
+| `refreshInterval` | 10–120 seconds |
+| `theme` | `dark` or `modern` |
+| `viewMode` | `single`, `split` or `led` |
+| `kioskMode` | `true` hides header and footer |
+| `ledScrollEnabled` / `ledScrollSpeed` | LED view scrolling (1500–8000 ms) |
+| `filters` | Either explicit flags (`{"bus": false}`) or a whitelist (`["subway","tram"]`, everything else off) |
+| `activeStationId`, `splitLeftId`, `splitRightId`, `homeStationId` | Which station each view starts on |
+| `mapLive` | Poll live vehicle positions in the map view (default `true`) |
+| `mapTileUrl`, `mapAttribution` | Point the map at a different tile server. Deployment-only — deliberately not accepted from the URL, where a link could otherwise repoint the map at any host |
+
+Every key is optional, and unknown or malformed values are ignored rather than
+applied — a typo falls back to the previous layer instead of breaking the board.
+A missing `config.json` is a supported state too; the app simply has no presets.
+
+> `config.json` is fetched with revalidation and served network-first by the
+> service worker, so an edit takes effect on the next load — no cache bust needed.
+
+### 2. URL parameters — per-embed config
+
+The same settings can be passed in the query string. These win over everything
+else, and — unless you add `persist=1` — they are **not** written to
+localStorage, so embedding the board somewhere never overwrites the settings
+that browser already has.
+
+```
+https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1
+```
+
+| Parameter | Alias | Example |
+|-----------|-------|---------|
+| `stop` (repeatable) | — | `stop=900100003`, `stop=900100003\|S%2BU%20Alexanderplatz:4` |
+| `stops` | — | `stops=900100003,900120005` (comma-separated) |
+| `view` | — | `view=single` / `split` / `led` |
+| `kiosk` | — | `kiosk=1` |
+| `theme` | — | `theme=modern` |
+| `count` | `departures` | `count=9` |
+| `refresh` | `interval` | `refresh=45` |
+| `provider` | `source` | `provider=v6.vbb.transport.rest` |
+| `filter` | `filters` | `filter=subway,tram` (everything else off) |
+| `scroll` / `scrollSpeed` | — | `scroll=0`, `scrollSpeed=5000` |
+| `left` / `right` | — | Station IDs for the split panes |
+| `active` | — | Station ID the single view starts on |
+| `home` | — | Station ID the journey planner departs from |
+| `to` | `destination` | Journey destination, `<id>` or `<id>\|<name>` |
+| `live` | — | `live=0` turns off live vehicles on the map |
+| `persist` | — | `persist=1` saves the URL config to localStorage |
+
+A stop is `<id>`, `<id>:<walkMinutes>`, `<id>|<name>` or `<id>|<name>:<walkMinutes>`.
+The name is optional — with the ID alone the app resolves the real station name
+from the API in the background. Station IDs come from the settings panel's search
+or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true`.
+
+> URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
+> has to be written `S%2BU%20Alexanderplatz`.
+
+### Embedding in Home Assistant
+
+Because the config travels in the URL, no per-client setup is needed — add a
+**Webpage card** (or an `iframe` panel) pointing at the board:
+
+```yaml
+type: iframe
+url: >-
+  https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
+aspect_ratio: 50%
+```
+
+`kiosk=1` drops the header and footer so only the departure board is left, and
+each card can carry its own stations — the same Home Assistant instance can show
+different stops on different dashboards without any of them interfering.
+
+---
+
+## Deploying
+
+The web app is published by the **Deploy Web App** workflow
+(`.github/workflows/pages.yml`) to a `gh-pages` branch, which GitHub Pages
+serves:
+
+| Source | URL |
+|--------|-----|
+| `main` (on every push) | `https://jako-dev.github.io/bvg-display/` |
+| any branch (on demand) | `https://jako-dev.github.io/bvg-display/preview/<branch>/` |
+
+Both are live at the same time, so previewing a branch never takes the demo
+down. `/preview/` lists whatever is currently published.
+
+### Publishing a branch without merging
+
+Actions → **Deploy Web App** → *Run workflow* → pick the branch → *Run*.
+
+The branch needs this workflow file on it to appear in that list; for a branch
+that predates it, run the workflow from `main` and put the branch name in the
+`ref` input instead.
+
+Deleting a branch removes its preview automatically.
+
+### One-time setup
+
+The workflow publishes to `gh-pages`, so Pages has to be pointed at it:
+
+**Settings → Pages → Build and deployment → Source: Deploy from a branch →
+Branch: `gh-pages` / `(root)`**
+
+Until that switch is made, the workflow will push to `gh-pages` but the live
+site will still be served from `main`. The `gh-pages` branch is created by the
+first run — there is nothing to set up by hand.
+
+### What gets published
+
+An allow-list, set as `SITE_PATHS` at the top of the workflow — the repo also
+holds the ESP32 firmware, which has no business being served. Add new top-level
+assets there when they appear.
+
+Each deployment is a self-contained directory, so a preview's service worker is
+scoped to its own subdirectory and cannot interfere with the live site.
 
 ---
 
@@ -161,14 +327,20 @@ All runtime settings are adjustable from the config page — no reflashing neede
 ```
 bvg-display/
 ├── index.html              # Web app entry
+├── config.json             # Optional deployment defaults (preset stations)
 ├── manifest.json           # PWA manifest (install as app)
 ├── service-worker.js       # Offline app-shell cache (never caches live data)
 ├── icons/                  # PWA icons (192/512/apple-touch)
 ├── css/styles.css          # Themes & layout
 ├── js/
 │   ├── api.js              # Transport REST API wrapper
+│   ├── config.js           # config.json + URL parameter config
 │   ├── app.js              # Application logic
+│   ├── journey.js          # Connection list rendering
+│   ├── map.js              # Leaflet map + SVG schematic fallback
 │   └── led-renderer.js     # Canvas LED panel emulator
+├── vendor/
+│   └── leaflet/            # Leaflet 1.9.4 (BSD-2-Clause), lazy-loaded
 ├── esp32/
 │   ├── platformio.ini      # PlatformIO config
 │   └── src/
@@ -178,8 +350,11 @@ bvg-display/
 │       ├── web_portal.h    # Embedded config web UI
 │       └── version.h       # Generated by CI on release builds — not committed
 └── .github/
+    ├── scripts/
+    │   └── preview-index.sh    # Generates the /preview/ listing page
     └── workflows/
-        └── build-firmware.yml  # CI: build on every esp32/ change, attach .bin to releases
+        ├── build-firmware.yml  # CI: build on every esp32/ change, attach .bin to releases
+        └── pages.yml           # Publishes the web app + per-branch previews
 ```
 
 ## API
@@ -194,6 +369,34 @@ Uses the public [transport.rest](https://transport.rest/) APIs:
 - No API key required
 - Rate limit: ~100 requests/minute
 - CORS enabled (browser-friendly)
+
+Endpoints used:
+
+| Endpoint | Used for |
+|----------|----------|
+| `/locations` | Station search |
+| `/stops/:id` | Resolving names and coordinates for stations given by ID |
+| `/stops/:id/departures` | The departure board |
+| `/journeys` | Journey planner (with `polylines=true` for the map) |
+| `/trips/:id` | A single trip's route shape (`polyline=true`) |
+| `/radar` | Live vehicle positions in the visible area |
+
+The map polls `/radar` every 15s — one request per tick regardless of how many
+vehicles are in view, which is what keeps the live map inside the rate limit.
+Trip routes are fetched on demand (when you click a departure), not for every
+row on the board.
+
+### Map tiles
+
+Map tiles come from OpenStreetMap by default. That is a shared, donated
+resource with a [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) —
+fine for a personal dashboard, not for anything high-traffic. Point
+`mapTileUrl` in `config.json` at your own tile server if you need more.
+
+If tiles can't be reached at all — offline, blocked, or the tile server is
+down — the map falls back to a self-contained SVG schematic drawn from the same
+coordinates. Routes, stops and vehicles still render; only the streets are
+missing.
 
 ## Troubleshooting
 

@@ -8,7 +8,7 @@
 
 // Bump this whenever a shell file changes so clients pick up the new set
 // instead of serving a stale mix of old and new files.
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = `bvg-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [
@@ -18,15 +18,32 @@ const SHELL_FILES = [
     './css/styles.css',
     './js/api.js',
     './js/app.js',
+    './js/config.js',
     './js/led-renderer.js',
+    './js/map.js',
+    './js/journey.js',
     './icons/icon-192.png',
     './icons/icon-512.png'
+];
+
+// Deployment config. Optional by design — a deployment without it just has no
+// preset stations — so it is cached separately: addAll() rejects the whole
+// batch on a single 404 and would leave the app with no offline shell at all.
+// Leaflet is vendored but only loaded when the map view opens, so it is
+// precached alongside config.json rather than in the critical shell batch —
+// a deployment that drops the vendor directory still gets a working board.
+const OPTIONAL_FILES = [
+    './config.json',
+    './vendor/leaflet/leaflet.js',
+    './vendor/leaflet/leaflet.css'
 ];
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => cache.addAll(SHELL_FILES))
+            .then((cache) => cache.addAll(SHELL_FILES).then(() => Promise.all(
+                OPTIONAL_FILES.map((file) => cache.add(file).catch(() => {}))
+            )))
             .then(() => self.skipWaiting())
     );
 });
@@ -54,18 +71,24 @@ self.addEventListener('fetch', (event) => {
     // show old departures as if they were current.
     if (url.origin !== self.location.origin) return;
 
-    // Network-first for the HTML document itself, so a deployed update is
-    // picked up on the next load instead of waiting for a cache eviction.
-    // Falls back to the cached shell when offline.
-    if (request.mode === 'navigate' || url.pathname.endsWith('/index.html')) {
+    // Network-first for the HTML document and for config.json, so a deployed
+    // update — a new page, or a changed set of preset stations — is picked up
+    // on the next load instead of waiting for a cache eviction. Both fall back
+    // to the cached copy when offline.
+    const isDocument = request.mode === 'navigate' || url.pathname.endsWith('/index.html');
+    const isConfig = url.pathname.endsWith('/config.json');
+    if (isDocument || isConfig) {
+        const fallback = isConfig ? './config.json' : './index.html';
         event.respondWith(
             fetch(request)
                 .then((response) => {
-                    const copy = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+                    if (response.ok) {
+                        const copy = response.clone();
+                        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+                    }
                     return response;
                 })
-                .catch(() => caches.match('./index.html'))
+                .catch(() => caches.match(fallback))
         );
         return;
     }

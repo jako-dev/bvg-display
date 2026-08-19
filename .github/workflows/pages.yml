@@ -1,0 +1,244 @@
+name: Deploy Web App
+
+# Publishes the web app to the `gh-pages` branch, which GitHub Pages serves.
+#
+#   main            -> https://jako-dev.github.io/bvg-display/
+#   any branch      -> https://jako-dev.github.io/bvg-display/preview/<branch>/
+#
+# Both live at the same time, so previewing a branch never takes the demo down.
+# To publish a branch: Actions -> Deploy Web App -> Run workflow -> pick the
+# branch. (The branch needs this workflow file on it to appear in that list;
+# for older branches, pass its name in the `ref` input instead.)
+#
+# Deleting a branch removes its preview automatically.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'esp32/**'
+      - '**.md'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/tag to publish (leave empty to use the branch selected above)'
+        required: false
+        type: string
+  delete:
+
+permissions:
+  contents: write   # pushes the built site to the gh-pages branch
+
+# Every run rewrites the same branch, so they must not overlap. Queue rather
+# than cancel: a superseded preview deploy is still a deploy someone asked for.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+env:
+  # What actually ships. Deliberately an allow-list — the repo also holds the
+  # ESP32 firmware, which has no business being served. Add new top-level
+  # assets here when they appear.
+  SITE_PATHS: index.html manifest.json service-worker.js config.json css js icons vendor
+  PAGES_BRANCH: gh-pages
+
+jobs:
+  # ---------------------------------------------------------------- publish --
+  publish:
+    if: github.event_name != 'delete'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          RUN_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then
+            REF="$RUN_REF"
+            SLUG=""
+            echo "mode=root" >> "$GITHUB_OUTPUT"
+          else
+            REF="${INPUT_REF:-$RUN_REF}"
+            # Branch names contain slashes; flatten to one safe path segment.
+            SLUG=$(printf '%s' "$REF" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g; s#^[.-]*##; s#[.-]*$##')
+            if [ -z "$SLUG" ]; then
+              echo "::error::Could not derive a preview directory from ref '$REF'"
+              exit 1
+            fi
+            echo "mode=preview" >> "$GITHUB_OUTPUT"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out ${{ steps.target.outputs.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.ref }}
+
+      - name: Stage the site
+        run: |
+          set -euo pipefail
+          rm -rf _stage && mkdir _stage
+          missing=0
+          for path in $SITE_PATHS; do
+            if [ -e "$path" ]; then
+              cp -r "$path" _stage/
+            else
+              echo "::warning::'$path' is listed in SITE_PATHS but not present on this ref"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ ! -f _stage/index.html ]; then
+            echo "::error::index.html is missing — refusing to publish an empty site"
+            exit 1
+          fi
+          # Tells Pages to serve the tree as-is instead of running it through
+          # Jekyll, which would drop any path starting with an underscore.
+          touch _stage/.nojekyll
+          echo "Staged $(find _stage -type f | wc -l) files ($missing declared paths absent)"
+
+      - name: Publish
+        env:
+          MODE: ${{ steps.target.outputs.mode }}
+          SLUG: ${{ steps.target.outputs.slug }}
+          SOURCE_REF: ${{ steps.target.outputs.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "$PAGES_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$PAGES_BRANCH"
+            git branch -f "$PAGES_BRANCH" FETCH_HEAD
+          else
+            # First run: an orphan branch built from the empty tree, so the
+            # published site never carries the source history.
+            echo "Creating $PAGES_BRANCH"
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            git branch "$PAGES_BRANCH" "$(git commit-tree "$EMPTY_TREE" -m 'Initialise gh-pages')"
+          fi
+
+          # Hosted runners start clean, but a reused (self-hosted) one may not.
+          rm -rf ../site && git worktree prune
+          git worktree add ../site "$PAGES_BRANCH"
+
+          if [ "$MODE" = "root" ]; then
+            # Clear the old root so files deleted since the last deploy actually
+            # disappear — but never .git, and never the preview tree, which is a
+            # sibling deployment with its own lifecycle.
+            find ../site -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'preview' -exec rm -rf {} +
+            cp -a _stage/. ../site/
+            TARGET_DESC="root"
+          else
+            rm -rf "../site/preview/$SLUG"
+            mkdir -p "../site/preview/$SLUG"
+            cp -a _stage/. "../site/preview/$SLUG/"
+            TARGET_DESC="preview/$SLUG"
+          fi
+
+          "$GITHUB_WORKSPACE/.github/scripts/preview-index.sh" ../site
+
+          cd ../site
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No change to publish."
+          else
+            git commit -m "Deploy $TARGET_DESC from $SOURCE_REF@${SHA:0:7}"
+            # The concurrency group serialises runs, but a manual push to
+            # gh-pages could still land in between.
+            for attempt in 1 2 3; do
+              if git push origin "$PAGES_BRANCH"; then break; fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error::Could not push to $PAGES_BRANCH after 3 attempts"
+                exit 1
+              fi
+              echo "Push rejected, rebasing and retrying ($attempt/3)"
+              git fetch origin "$PAGES_BRANCH"
+              git rebase "origin/$PAGES_BRANCH"
+              sleep $((attempt * 5))
+            done
+          fi
+
+      - name: Summary
+        env:
+          MODE: ${{ steps.target.outputs.mode }}
+          SLUG: ${{ steps.target.outputs.slug }}
+          SOURCE_REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          if [ "$MODE" = "root" ]; then URL="$BASE/"; else URL="$BASE/preview/$SLUG/"; fi
+          {
+            echo "### Deployed"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | \`$SOURCE_REF\` |"
+            echo "| URL | $URL |"
+            echo
+            echo "Pages needs a moment to pick the change up."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- cleanup --
+  # A preview outlives its branch otherwise, and stale previews are worse than
+  # no previews: they look current.
+  cleanup:
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Remove the deleted branch's preview
+        env:
+          DELETED_REF: ${{ github.event.ref }}
+        run: |
+          set -euo pipefail
+          SLUG=$(printf '%s' "$DELETED_REF" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g; s#^[.-]*##; s#[.-]*$##')
+          if [ -z "$SLUG" ]; then
+            echo "Nothing to clean up for '$DELETED_REF'."
+            exit 0
+          fi
+
+          if ! git ls-remote --exit-code --heads origin "$PAGES_BRANCH" >/dev/null 2>&1; then
+            echo "No $PAGES_BRANCH branch — nothing to clean up."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --depth=1 origin "$PAGES_BRANCH"
+          git branch -f "$PAGES_BRANCH" FETCH_HEAD
+          rm -rf ../site && git worktree prune
+          git worktree add ../site "$PAGES_BRANCH"
+
+          if [ ! -d "../site/preview/$SLUG" ]; then
+            echo "No preview at preview/$SLUG."
+            exit 0
+          fi
+
+          rm -rf "../site/preview/$SLUG"
+
+          # A `delete` event runs the workflow from the default branch, which
+          # might not carry this script yet. Dropping the stale preview is the
+          # part that matters; a slightly out-of-date listing is not worth
+          # failing the job over.
+          INDEXER="$GITHUB_WORKSPACE/.github/scripts/preview-index.sh"
+          if [ -x "$INDEXER" ]; then
+            "$INDEXER" ../site
+          else
+            echo "::warning::$INDEXER not found on the default branch — preview removed, listing left as is"
+          fi
+
+          cd ../site
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Remove preview for deleted branch $DELETED_REF"
+            git push origin "$PAGES_BRANCH"
+          fi
