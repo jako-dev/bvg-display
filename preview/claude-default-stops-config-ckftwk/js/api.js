@@ -18,6 +18,8 @@ const BvgApi = (() => {
     const DEFAULT_PROVIDER = 'v6.bvg.transport.rest';
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
+    const SERVER_ERROR_RETRIES = 1;
+    const RETRY_DELAY_MS = 1500;
 
     let baseUrl = 'https://' + DEFAULT_PROVIDER;
     let lastRequestTime = 0;
@@ -51,6 +53,17 @@ const BvgApi = (() => {
         return { ...PROVIDERS };
     }
 
+    /**
+     * The other endpoint. BVG and VBB are separate deployments that both cover
+     * Berlin, so when one is down the other usually is not.
+     * @returns {{host: string, label: string}|null}
+     */
+    function getAlternateProvider() {
+        const current = getProvider();
+        const other = Object.keys(PROVIDERS).find(host => host !== current);
+        return other ? { host: other, label: PROVIDERS[other] } : null;
+    }
+
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
     /**
@@ -70,9 +83,13 @@ const BvgApi = (() => {
     }
 
     /**
-     * Rate-limited fetch wrapper with timeout
+     * Rate-limited fetch wrapper with timeout.
+     *
+     * 5xx responses are retried once. This is a free, public API and it does
+     * fall over from time to time; a single upstream hiccup should not empty
+     * the board when waiting a couple of seconds usually clears it.
      */
-    async function rateLimitedFetch(url) {
+    async function rateLimitedFetch(url, attempt = 0) {
         await reserveSlot();
 
         const controller = new AbortController();
@@ -80,17 +97,57 @@ const BvgApi = (() => {
 
         try {
             const response = await fetch(url, { signal: controller.signal });
+
             if (!response.ok) {
                 if (response.status === 429) {
-                    throw new Error('API-Limit erreicht. Bitte kurz warten.');
+                    const error = new Error('API-Limit erreicht. Bitte kurz warten.');
+                    error.status = 429;
+                    throw error;
                 }
-                throw new Error(`API-Fehler: ${response.status} ${response.statusText}`);
+
+                if (response.status >= 500 && attempt < SERVER_ERROR_RETRIES) {
+                    clearTimeout(timeoutId);
+                    await sleep(RETRY_DELAY_MS * (attempt + 1));
+                    return rateLimitedFetch(url, attempt + 1);
+                }
+
+                // 5xx is the upstream's problem, not the request's — say so,
+                // because "check your settings" is the wrong advice for it.
+                const error = new Error(response.status >= 500
+                    ? `Die Verkehrs-API antwortet gerade nicht (${response.status}). Das liegt am Anbieter, nicht an dieser App.`
+                    : `API-Fehler: ${response.status} ${response.statusText}`);
+                error.status = response.status;
+                error.upstream = response.status >= 500;
+                error.unreachable = response.status >= 500;
+                throw error;
             }
+
             return await response.json();
         } catch (e) {
             if (e.name === 'AbortError') {
-                throw new Error('Zeitüberschreitung — die API antwortet nicht.');
+                const error = new Error('Zeitüberschreitung — die API antwortet nicht.');
+                error.upstream = true;
+                error.unreachable = true;
+                throw error;
             }
+
+            // A server that falls over usually stops sending CORS headers with
+            // it, so the browser refuses to show us the response at all: we get
+            // an opaque TypeError with no status. That reads like a CORS
+            // misconfiguration but is nearly always the upstream being down —
+            // and it means the status-based retry above never sees it.
+            if (e instanceof TypeError) {
+                if (attempt < SERVER_ERROR_RETRIES) {
+                    clearTimeout(timeoutId);
+                    await sleep(RETRY_DELAY_MS * (attempt + 1));
+                    return rateLimitedFetch(url, attempt + 1);
+                }
+                const error = new Error('Die Verkehrs-API ist nicht erreichbar (Dienst überlastet oder offline).');
+                error.upstream = true;
+                error.unreachable = true;
+                throw error;
+            }
+
             throw e;
         } finally {
             clearTimeout(timeoutId);
@@ -423,6 +480,7 @@ const BvgApi = (() => {
         polylineStations,
         setProvider,
         getProvider,
-        getProviders
+        getProviders,
+        getAlternateProvider
     };
 })();

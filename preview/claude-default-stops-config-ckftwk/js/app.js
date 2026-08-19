@@ -19,6 +19,7 @@
     // vehicles randomly appearing and vanishing, and like a journey's later
     // legs having no vehicles at all.
     const RADAR_MAX_VEHICLES = 256;
+    const MAX_FAVOURITES = 8;
 
     // ===== State =====
     const state = {
@@ -36,7 +37,9 @@
         splitRightId: null,     // Station shown in the right split pane
         homeStationId: null,    // Journey origin — the "Home" the planner starts from
         homeAddress: null,      // Optional street address origin {address, latitude, longitude}
-        destination: null,      // Journey target {id, name}
+        destination: null,      // Journey target {id, name} or {name, latitude, longitude}
+        favourites: [],         // Saved destinations, same shape as `destination`
+        useGeocoder: true,      // Fall back to OpenStreetMap for unknown places
         mapLive: true,          // Poll /radar for live vehicles in the map view
         mapFilters: {           // Which products show as live vehicles on the map
             suburban: true, subway: true, tram: true,
@@ -79,6 +82,9 @@
     // Berlin is noise, seeing the ones on the route you're looking at is not.
     let mapFocus = null;
     let radarTruncated = false;
+    let lastSuccessfulLoad = '';
+    // Which station the rows currently on the board belong to.
+    let renderedStationId = null;
     // Set by whatever triggered the map (a journey, a departure row) and
     // consumed once the map view is actually up.
     let pendingMapScene = null;
@@ -142,6 +148,10 @@
         journeyTo: document.getElementById('journey-to'),
         journeyToResults: document.getElementById('journey-to-results'),
         journeySearch: document.getElementById('journey-search'),
+        journeyFav: document.getElementById('journey-fav'),
+        journeyFavourites: document.getElementById('journey-favourites'),
+        journeyWalkNote: document.getElementById('journey-walk-note'),
+        geocoderToggle: document.getElementById('geocoder-toggle'),
         journeyResults: document.getElementById('journey-results'),
         // Map
         viewMap: document.getElementById('view-map'),
@@ -188,6 +198,7 @@
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        Geocoder.configure({ enabled: state.useGeocoder });
         renderHomeAddress();
         renderJourneyControls();
         renderMapFilters();
@@ -300,6 +311,8 @@
             state.apiProvider = parsed.apiProvider || state.apiProvider;
             if (parsed.mapLive !== undefined) state.mapLive = parsed.mapLive !== false;
             state.mapFilters = { ...state.mapFilters, ...parsed.mapFilters };
+            if (Array.isArray(parsed.favourites)) state.favourites = parsed.favourites.filter(isUsablePlace);
+            if (parsed.useGeocoder !== undefined) state.useGeocoder = parsed.useGeocoder !== false;
             if (parsed.destination && (parsed.destination.id
                     || (isFinite(parsed.destination.latitude) && isFinite(parsed.destination.longitude)))) {
                 state.destination = parsed.destination;
@@ -334,6 +347,8 @@
                 homeStationId: state.homeStationId,
                 homeAddress: state.homeAddress,
                 destination: state.destination,
+                favourites: state.favourites,
+                useGeocoder: state.useGeocoder,
                 mapLive: state.mapLive,
                 mapFilters: state.mapFilters,
                 apiProvider: state.apiProvider,
@@ -484,6 +499,7 @@
             state.homeStationId = e.target.value || null;
             saveState();
             renderSavedStations();
+            renderWalkNote();
             fetchJourneys();
         });
 
@@ -551,10 +567,42 @@
             dom.journeyTo.value = item.dataset.name;
             dom.journeyToResults.classList.add('hidden');
             saveState();
+            renderFavourites();
             fetchJourneys();
         });
 
         dom.journeySearch.addEventListener('click', () => fetchJourneys());
+
+        // Favourites
+        dom.journeyFav.addEventListener('click', toggleFavourite);
+
+        dom.journeyFavourites.addEventListener('click', (e) => {
+            const removeAt = e.target.closest('[data-remove]');
+            if (removeAt) {
+                // The × sits inside the chip, so stop it also selecting it.
+                e.stopPropagation();
+                state.favourites.splice(parseInt(removeAt.dataset.remove, 10), 1);
+                saveState();
+                renderFavourites();
+                return;
+            }
+
+            const chip = e.target.closest('.fav-chip[data-index]');
+            if (!chip) return;
+            const fav = state.favourites[parseInt(chip.dataset.index, 10)];
+            if (!fav) return;
+            state.destination = { ...fav };
+            dom.journeyTo.value = fav.name;
+            saveState();
+            renderFavourites();
+            fetchJourneys();
+        });
+
+        dom.geocoderToggle.addEventListener('change', (e) => {
+            state.useGeocoder = e.target.checked;
+            Geocoder.configure({ enabled: state.useGeocoder });
+            saveState();
+        });
         dom.journeyTo.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && state.destination) {
                 dom.journeyToResults.classList.add('hidden');
@@ -686,6 +734,19 @@
             state.ledScrollSpeed = parseInt(e.target.value, 10) || 3000;
             saveState();
             if (state.viewMode === 'led') fetchLedDepartures();
+        });
+
+        dom.boardMessage.addEventListener('click', (e) => {
+            const btn = e.target.closest('#switch-provider[data-host]');
+            if (!btn) return;
+            state.apiProvider = btn.dataset.host;
+            BvgApi.setProvider(state.apiProvider);
+            state.apiProvider = BvgApi.getProvider();
+            dom.apiProviderSelect.value = state.apiProvider;
+            saveState();
+            updateDataSourceLabel();
+            clearBoardMessage();
+            refreshCurrentView();
         });
 
         // Kiosk mode
@@ -975,7 +1036,17 @@
         dom.noStationMsg.classList.add('hidden');
         clearBoardMessage();
         dom.loadingIndicator.classList.remove('hidden');
-        dom.departuresList.innerHTML = '';
+
+        // Only blank the board when the station actually changed. Wiping it on
+        // every refresh means a failed poll has nothing left to fall back on —
+        // and showing the previous station's departures under a new name would
+        // be worse than showing nothing, hence the check rather than never
+        // clearing at all.
+        if (renderedStationId !== state.activeStationId) {
+            dom.departuresList.innerHTML = '';
+            dom.departuresList.classList.remove('is-stale');
+            renderedStationId = null;
+        }
 
         const station = getActiveStation();
         if (station) dom.currentStationName.textContent = station.name;
@@ -1021,6 +1092,9 @@
             if (token !== requestToken) return; // superseded by a newer request
 
             dom.loadingIndicator.classList.add('hidden');
+            dom.departuresList.classList.remove('is-stale');
+            renderedStationId = station.id;
+            lastSuccessfulLoad = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 
             const visible = departures.slice(0, state.departureCount);
             renderDepartures(visible);
@@ -1038,13 +1112,45 @@
             if (token !== requestToken) return;
             console.error('Failed to fetch departures:', e);
             dom.loadingIndicator.classList.add('hidden');
-            dom.departuresList.innerHTML = '';
-            dom.alertsBanner.classList.add('hidden');
-            showBoardMessage(`
-                <p class="error-text">Fehler beim Laden der Abfahrten.</p>
-                <p class="error-detail">${escapeHtml(e.message)}</p>
-            `);
+
+            // Keep whatever is already on the board. A wall display showing
+            // departures from two minutes ago is far more use than one showing
+            // an error, and the firmware has always behaved this way. The rows
+            // are dimmed and stamped so nobody mistakes them for live.
+            const hasRows = dom.departuresList.children.length > 0
+                && renderedStationId === state.activeStationId;
+            if (hasRows) {
+                dom.departuresList.classList.add('is-stale');
+                showBoardMessage(`
+                    <p class="error-text">${escapeHtml(e.message)}</p>
+                    <p class="error-detail">Angezeigt werden die zuletzt geladenen Abfahrten
+                       (${escapeHtml(lastSuccessfulLoad || 'unbekannter Zeitpunkt')}).</p>
+                    ${providerFallbackHtml(e)}
+                `);
+            } else {
+                dom.alertsBanner.classList.add('hidden');
+                showBoardMessage(`
+                    <p class="error-text">Fehler beim Laden der Abfahrten.</p>
+                    <p class="error-detail">${escapeHtml(e.message)}</p>
+                    ${providerFallbackHtml(e)}
+                `);
+            }
         }
+    }
+
+    /**
+     * When the endpoint itself is unreachable, offer the other one. BVG and VBB
+     * are separately hosted and both cover Berlin, so one being down rarely
+     * means both are. Offered rather than switched automatically — the data
+     * source is a visible setting and should not change behind your back.
+     */
+    function providerFallbackHtml(error) {
+        if (!error || !error.unreachable) return '';
+        const alternate = BvgApi.getAlternateProvider();
+        if (!alternate) return '';
+        return `<button class="btn-ghost" id="switch-provider" data-host="${escapeHtml(alternate.host)}">
+                    Auf ${escapeHtml(alternate.label)} umschalten
+                </button>`;
     }
 
     function filterByWalkTime(departures, walkTime) {
@@ -1189,6 +1295,7 @@
         dom.apiProviderSelect.value = state.apiProvider;
         dom.kioskToggle.checked = state.kioskMode;
         dom.ledScrollToggle.checked = state.ledScrollEnabled;
+        dom.geocoderToggle.checked = state.useGeocoder;
         dom.ledScrollSpeed.value = state.ledScrollSpeed;
     }
 
@@ -1444,6 +1551,65 @@
         if (state.destination && dom.journeyTo.value !== state.destination.name) {
             dom.journeyTo.value = state.destination.name || state.destination.id;
         }
+
+        renderFavourites();
+        renderWalkNote();
+    }
+
+    // ===== Favourites =====
+
+    function isFavourite(place) {
+        const key = placeKey(place);
+        return !!key && state.favourites.some(fav => placeKey(fav) === key);
+    }
+
+    function toggleFavourite() {
+        const dest = state.destination;
+        if (!isUsablePlace(dest)) return;
+
+        const key = placeKey(dest);
+        if (isFavourite(dest)) {
+            state.favourites = state.favourites.filter(fav => placeKey(fav) !== key);
+        } else {
+            // Newest first, capped — a favourites list you have to scroll is
+            // no faster than typing the name again.
+            state.favourites = [{ ...dest }, ...state.favourites.filter(fav => placeKey(fav) !== key)]
+                .slice(0, MAX_FAVOURITES);
+        }
+        saveState();
+        renderFavourites();
+    }
+
+    function renderFavourites() {
+        dom.journeyFavourites.innerHTML = state.favourites.map((fav, i) => `
+            <button class="fav-chip" data-index="${i}" title="${escapeHtml(fav.name)}">
+                <span class="fav-name">${escapeHtml(fav.name)}</span>
+                <span class="fav-remove" data-remove="${i}" role="presentation">&times;</span>
+            </button>
+        `).join('');
+
+        const saved = isFavourite(state.destination);
+        dom.journeyFav.textContent = saved ? '★' : '☆';
+        dom.journeyFav.setAttribute('aria-pressed', saved ? 'true' : 'false');
+        dom.journeyFav.title = saved ? 'Ziel nicht mehr merken' : 'Ziel merken';
+        dom.journeyFav.disabled = !isUsablePlace(state.destination);
+    }
+
+    /**
+     * Say how the walk at the start is being handled, because the two origins
+     * treat it differently and the difference is otherwise invisible.
+     */
+    function renderWalkNote() {
+        const origin = getJourneyOrigin();
+        if (!origin) {
+            dom.journeyWalkNote.textContent = '';
+        } else if (state.homeStationId === HOME_ADDRESS_VALUE) {
+            dom.journeyWalkNote.textContent = 'Fußweg zur Haltestelle wird berechnet';
+        } else if (origin.walkTime > 0) {
+            dom.journeyWalkNote.textContent = `Fußweg ${origin.walkTime} min ab Einstellungen eingerechnet`;
+        } else {
+            dom.journeyWalkNote.textContent = 'Kein Fußweg eingerechnet';
+        }
     }
 
     // ===== Home address =====
@@ -1481,7 +1647,17 @@
         }
     }
 
-    const PLACE_KIND_LABELS = { stop: '', poi: 'Ort', address: 'Adresse' };
+    const PLACE_KIND_LABELS = { stop: '', poi: 'Ort', address: 'Adresse', osm: 'OSM' };
+
+    /** A place is usable if we can name it and locate it. */
+    function isUsablePlace(place) {
+        if (!place || !place.name) return false;
+        return !!place.id || (isFinite(place.latitude) && isFinite(place.longitude));
+    }
+
+    /** Stable identity for a saved destination — id for stops, position otherwise. */
+    const placeKey = (place) => !place ? ''
+        : (place.id ? `id:${place.id}` : `at:${Number(place.latitude).toFixed(5)},${Number(place.longitude).toFixed(5)}`);
 
     /**
      * Destination search covers stops, points of interest and addresses — you
@@ -1491,13 +1667,26 @@
      */
     async function searchDestination(query) {
         try {
-            const results = await BvgApi.searchPlaces(query, {
+            let results = await BvgApi.searchPlaces(query, {
                 stops: true, addresses: true, poi: true, results: 15
             });
 
+            // Only reach outside the transport API when its own index had no
+            // actual place to offer — stop matches alone mean the thing you
+            // typed wasn't found, just things that sound like it.
+            if (state.useGeocoder && !results.some(place => place.kind !== 'stop')) {
+                const osm = await Geocoder.search(query);
+                results = results.concat(osm.map(hit => ({
+                    kind: 'osm',
+                    id: '',
+                    name: hit.name,
+                    detail: hit.detail,
+                    latitude: hit.latitude,
+                    longitude: hit.longitude
+                })));
+            }
+
             if (results.length === 0) {
-                // The POI index is the transport operator's, and it is thin
-                // outside well-known landmarks. A street address always works.
                 dom.journeyToResults.innerHTML =
                     '<div class="search-result-item">Nichts gefunden — versuch die Straße und Hausnummer</div>';
             } else {
@@ -1507,7 +1696,10 @@
                          data-id="${escapeHtml(place.id)}"
                          data-name="${escapeHtml(place.name)}"
                          data-lat="${place.latitude}" data-lng="${place.longitude}">
-                        <div>${escapeHtml(place.name)}</div>
+                        <div class="result-name">
+                            ${escapeHtml(place.name)}
+                            ${place.detail ? `<span class="result-detail">${escapeHtml(place.detail)}</span>` : ''}
+                        </div>
                         <div class="result-products">${place.kind === 'stop'
                             ? getProductBadges(place.products)
                             : `<span class="result-kind">${escapeHtml(PLACE_KIND_LABELS[place.kind])}</span>`}</div>

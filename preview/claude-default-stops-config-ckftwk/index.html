@@ -47,6 +47,16 @@
                     <p class="setting-hint">Wird als Startpunkt in der Verbindungssuche angeboten &mdash; der Fußweg zur Haltestelle wird dann mitberechnet.</p>
                 </div>
 
+                <!-- Place lookup -->
+                <div class="setting-group">
+                    <label>Ortssuche</label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="geocoder-toggle" checked>
+                        <span>Orte über OpenStreetMap finden</span>
+                    </label>
+                    <p class="setting-hint">Findet Ziele, die der Verkehrsverbund nicht kennt (Restaurants, Markthallen, Läden). Nur wenn die Verbundsuche nichts findet, wird der Suchbegriff an <code>photon.komoot.io</code> geschickt.</p>
+                </div>
+
                 <!-- Transport Filters -->
                 <div class="setting-group">
                     <label>Verkehrsmittel</label>
@@ -275,7 +285,13 @@
                         <input type="text" id="journey-to" placeholder="Ziel suchen&hellip;" autocomplete="off">
                         <div id="journey-to-results" class="search-results hidden"></div>
                     </div>
+                    <button id="journey-fav" class="btn-icon journey-fav" title="Ziel merken"
+                            aria-label="Ziel merken" aria-pressed="false">&#9734;</button>
                     <button id="journey-search" class="btn-primary">Verbindungen</button>
+                </div>
+                <div class="journey-meta-row">
+                    <div id="journey-favourites" class="journey-favourites"></div>
+                    <span id="journey-walk-note" class="journey-walk-note"></span>
                 </div>
                 <div id="journey-results" class="journey-results" aria-live="polite"></div>
             </div>
@@ -329,6 +345,7 @@
     <script src="js/led-renderer.js" defer></script>
     <script src="js/map.js" defer></script>
     <script src="js/journey.js" defer></script>
+    <script src="js/geocode.js" defer></script>
     <script src="js/app.js" defer></script>
 </body>
 </html>

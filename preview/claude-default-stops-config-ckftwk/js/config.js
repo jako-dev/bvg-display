@@ -169,6 +169,9 @@ const AppConfig = (() => {
         const filters = parseFilters(raw.filters);
         if (filters) settings.filters = filters;
 
+        const useGeocoder = toBool(raw.useGeocoder);
+        if (useGeocoder !== undefined) settings.useGeocoder = useGeocoder;
+
         const mapLive = toBool(raw.mapLive);
         if (mapLive !== undefined) settings.mapLive = mapLive;
 
@@ -263,7 +266,8 @@ const AppConfig = (() => {
             homeStationId: first('home'),
             homeAddress: first('address'),
             destination: first('to', 'destination'),
-            mapLive: first('live')
+            mapLive: first('live'),
+            useGeocoder: first('geocoder')
         };
         for (const [key, value] of Object.entries(map)) {
             if (value !== null) raw[key] = value;
