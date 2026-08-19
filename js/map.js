@@ -41,15 +41,22 @@ const TransitMap = (() => {
     let mode = null;          // 'leaflet' | 'svg' | null
     let container = null;
     let map = null;           // Leaflet map instance
-    let layerGroup = null;    // everything we draw lives here, so clearing is one call
+    let staticLayer = null;   // routes + stops — rebuilt only when they change
+    let vehicleLayer = null;  // vehicles — markers are moved, not recreated
     let svgEl = null;
+    let svgStatic = null;
+    let svgVehicles = null;
+    let projection = null;    // reused between vehicle ticks so the view can't jitter
+    let vehicleMarkers = new Map(); // key -> Leaflet marker / SVG <g>
     let tileConfig = { url: DEFAULT_TILE_URL, attribution: DEFAULT_ATTRIBUTION };
     let leafletPromise = null;
     let onFallback = null;    // notified when we drop from tiles to schematic
 
     // The current scene. Re-rendered wholesale on every change — the data sets
     // are small (tens of points) and this keeps the two backends in lockstep.
-    let scene = { routes: [], stops: [], vehicles: [], focus: null };
+    // `pins` are standing landmarks (home), kept apart from `stops` so that
+    // drawing a new route doesn't wipe them.
+    let scene = { routes: [], stops: [], vehicles: [], pins: [], focus: null };
 
     const productColor = (product) => PRODUCT_COLORS[product] || '#6b7785';
 
@@ -146,7 +153,8 @@ const TransitMap = (() => {
             const probe = probeTiles(tiles);
             tiles.addTo(map);
 
-            layerGroup = L.layerGroup().addTo(map);
+            staticLayer = L.layerGroup().addTo(map);
+            vehicleLayer = L.layerGroup().addTo(map);
             mode = 'leaflet';
 
             // Leaflet measures the container on creation; in a view that was
@@ -174,14 +182,17 @@ const TransitMap = (() => {
             // position Leaflet never computed, and removing the map with those
             // still attached throws on `_leaflet_pos`.
             try {
-                if (layerGroup) layerGroup.clearLayers();
+                if (staticLayer) staticLayer.clearLayers();
+                if (vehicleLayer) vehicleLayer.clearLayers();
                 map.remove();
             } catch (e) {
                 console.warn('Leaflet teardown failed, continuing to schematic:', e.message);
             }
             map = null;
-            layerGroup = null;
+            staticLayer = null;
+            vehicleLayer = null;
         }
+        vehicleMarkers.clear();
         mode = 'svg';
         buildSvg();
         renderScene();
@@ -218,15 +229,39 @@ const TransitMap = (() => {
     }
 
     /**
-     * @param {Array<{lat: number, lng: number, label: string, product?: string, direction?: string}>} vehicles
+     * Hand over the latest radar payload. Positions update once per poll —
+     * markers are reused across polls (keyed below) so they move rather than
+     * being destroyed and recreated, but nothing is animated in between.
+     *
+     * @param {Array<{key?: string, lat: number, lng: number, label: string,
+     *                product?: string, direction?: string}>} vehicles
      */
     function setVehicles(vehicles) {
-        scene.vehicles = Array.isArray(vehicles) ? vehicles.filter(v => v && isFinite(v.lat) && isFinite(v.lng)) : [];
-        renderVehiclesOnly();
+        scene.vehicles = Array.isArray(vehicles)
+            ? vehicles.filter(v => v && isFinite(v.lat) && isFinite(v.lng))
+            : [];
+        syncVehicles();
+    }
+
+    // Trip id where the API gives one; otherwise line+direction, which is
+    // stable enough that a marker isn't torn down and rebuilt every poll.
+    const vehicleKey = (v) => v.key || v.tripId || `${v.label}|${v.direction || ''}`;
+
+    /**
+     * Standing landmarks — currently just "home". Unlike stops these survive a
+     * new route being drawn, and they are left out of `fit()`: showing a line
+     * across town should frame the line, not zoom out to take in your flat.
+     * @param {Array<{lat: number, lng: number, label: string, glyph?: string}>} pins
+     */
+    function setPins(pins) {
+        scene.pins = Array.isArray(pins)
+            ? pins.filter(p => p && isFinite(p.lat) && isFinite(p.lng))
+            : [];
+        renderScene();
     }
 
     function clear() {
-        scene = { routes: [], stops: [], vehicles: [], focus: null };
+        scene = { routes: [], stops: [], vehicles: [], pins: scene.pins, focus: null };
         renderScene();
     }
 
@@ -253,21 +288,19 @@ const TransitMap = (() => {
 
     // ===== Rendering =====
 
+    // Routes and stops change rarely; vehicles change several times a second.
+    // Keeping them on separate layers means a vehicle tick never rebuilds a
+    // route, and a new route never resets the animation.
     function renderScene() {
-        if (mode === 'leaflet') renderLeaflet();
+        if (mode === 'leaflet') renderLeafletStatic();
         else if (mode === 'svg') renderSvg();
+        syncVehicles();
     }
 
-    // Vehicles move on every radar poll while routes stay put, so redrawing
-    // just them avoids tearing down the whole scene several times a minute.
-    function renderVehiclesOnly() {
-        renderScene();
-    }
-
-    function renderLeaflet() {
-        if (!map || !layerGroup || !window.L) return;
+    function renderLeafletStatic() {
+        if (!map || !staticLayer || !window.L) return;
         const L = window.L;
-        layerGroup.clearLayers();
+        staticLayer.clearLayers();
 
         for (const route of scene.routes) {
             L.polyline(route.points, {
@@ -277,31 +310,119 @@ const TransitMap = (() => {
                 dashArray: route.dashed ? '6 8' : null,
                 lineJoin: 'round',
                 lineCap: 'round'
-            }).addTo(layerGroup);
+            }).addTo(staticLayer);
+        }
+
+        for (const pin of scene.pins) {
+            const icon = L.divIcon({
+                className: 'map-pin-icon',
+                html: `<span class="map-pin">${escapeHtml(pin.glyph || '🏠')}</span>`,
+                iconSize: null
+            });
+            L.marker([pin.lat, pin.lng], { icon, keyboard: false, zIndexOffset: 500 })
+                .addTo(staticLayer)
+                .bindTooltip(pin.label || 'Zuhause', { direction: 'top' });
         }
 
         for (const stop of scene.stops) {
             const major = stop.kind === 'origin' || stop.kind === 'destination';
-            L.circleMarker([stop.lat, stop.lng], {
-                radius: major ? 7 : 4,
+            const marker = L.circleMarker([stop.lat, stop.lng], {
+                radius: major ? 7 : 5,
                 color: '#ffffff',
                 weight: major ? 3 : 2,
                 fillColor: major ? '#1b1f24' : '#5b6672',
                 fillOpacity: 1
-            }).addTo(layerGroup).bindTooltip(stop.name, { direction: 'top' });
+            }).addTo(staticLayer);
+
+            // Endpoints stay labelled; intermediate stops would collide into an
+            // unreadable smear on a 30-stop line, so those name on hover.
+            marker.bindTooltip(stop.name, {
+                direction: 'top',
+                permanent: major && scene.stops.length <= 12,
+                className: 'map-stop-tip'
+            });
+        }
+    }
+
+    /**
+     * Reconcile the marker set against the current vehicles: create the new
+     * ones, drop the departed, and move the rest. Recreating every marker on
+     * each poll would make the whole fleet flicker and drop any open tooltip.
+     */
+    function syncVehicles() {
+        if (mode === 'leaflet' && (!map || !vehicleLayer || !window.L)) return;
+        if (mode === 'svg' && !svgVehicles) return;
+        if (!mode) return;
+
+        const seen = new Set();
+        for (const vehicle of scene.vehicles) {
+            const key = vehicleKey(vehicle);
+            seen.add(key);
+            if (!vehicleMarkers.has(key)) {
+                vehicleMarkers.set(key, mode === 'leaflet'
+                    ? createLeafletVehicle(vehicle)
+                    : createSvgVehicle(vehicle));
+            }
         }
 
-        for (const vehicle of scene.vehicles) {
-            const color = productColor(vehicle.product);
-            const icon = L.divIcon({
-                className: 'map-vehicle-icon',
-                html: `<span class="map-vehicle" style="--vehicle-color:${color}">${escapeHtml(vehicle.label)}</span>`,
-                iconSize: null
-            });
-            L.marker([vehicle.lat, vehicle.lng], { icon, keyboard: false })
-                .addTo(layerGroup)
-                .bindTooltip(`${vehicle.label} → ${vehicle.direction || '?'}`, { direction: 'top' });
+        for (const [key, marker] of vehicleMarkers) {
+            if (seen.has(key)) continue;
+            if (mode === 'leaflet') vehicleLayer.removeLayer(marker);
+            else marker.remove();
+            vehicleMarkers.delete(key);
         }
+
+        placeVehicles();
+    }
+
+    /** Put every marker at its reported position. */
+    function placeVehicles() {
+        for (const vehicle of scene.vehicles) {
+            const marker = vehicleMarkers.get(vehicleKey(vehicle));
+            if (!marker) continue;
+            if (mode === 'leaflet') {
+                marker.setLatLng([vehicle.lat, vehicle.lng]);
+            } else if (projection) {
+                const [x, y] = projection([vehicle.lat, vehicle.lng]);
+                marker.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)})`);
+            }
+        }
+    }
+
+    function createLeafletVehicle(vehicle) {
+        const L = window.L;
+        const icon = L.divIcon({
+            className: 'map-vehicle-icon',
+            html: `<span class="map-vehicle" style="--vehicle-color:${productColor(vehicle.product)}">${escapeHtml(vehicle.label)}</span>`,
+            iconSize: null
+        });
+        return L.marker([vehicle.lat, vehicle.lng], { icon, keyboard: false })
+            .addTo(vehicleLayer)
+            .bindTooltip(`${vehicle.label} → ${vehicle.direction || '?'}`, { direction: 'top' });
+    }
+
+    function createSvgVehicle(vehicle) {
+        const ns = 'http://www.w3.org/2000/svg';
+        const group = document.createElementNS(ns, 'g');
+
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('r', '9');
+        dot.setAttribute('fill', productColor(vehicle.product));
+        dot.setAttribute('stroke', 'var(--map-stop-ring, #ffffff)');
+        dot.setAttribute('stroke-width', '2');
+
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('y', '3.5');
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('class', 'map-schematic-vehicle');
+        label.textContent = vehicle.label;
+
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = `${vehicle.label} → ${vehicle.direction || '?'}`;
+
+        group.append(title, dot, label);
+        svgVehicles.appendChild(group);
+        return group;
     }
 
     /**
@@ -312,8 +433,23 @@ const TransitMap = (() => {
     function renderSvg() {
         if (!svgEl) return;
 
-        const points = collectPoints();
+        // Vehicles are deliberately excluded from the framing: including them
+        // would re-fit the view every time one moved, and the whole schematic
+        // would crawl around. Only fall back to them when nothing else exists.
+        const anchors = [];
+        for (const route of scene.routes) anchors.push(...route.points);
+        for (const stop of scene.stops) anchors.push([stop.lat, stop.lng]);
+        // Included here, unlike in fit(): the schematic has no viewport, so a
+        // pin outside the projected bounds would simply not be drawn.
+        for (const pin of scene.pins) anchors.push([pin.lat, pin.lng]);
+        const points = anchors.length > 0 ? anchors : collectPoints();
+
         svgEl.innerHTML = '';
+        vehicleMarkers.clear();
+        svgStatic = null;
+        svgVehicles = null;
+        projection = null;
+
         if (points.length === 0) {
             svgEl.setAttribute('viewBox', '0 0 100 60');
             return;
@@ -342,13 +478,20 @@ const TransitMap = (() => {
             // SVG y grows downward, latitude grows northward — hence the flip.
             offsetY + (maxLat - lat) * scale
         ];
+        // Held for the vehicle ticks, which must place markers in the same
+        // coordinate space without recomputing (and possibly shifting) it.
+        projection = project;
 
         const svgNs = 'http://www.w3.org/2000/svg';
+        svgStatic = document.createElementNS(svgNs, 'g');
+        svgVehicles = document.createElementNS(svgNs, 'g');
+        svgEl.append(svgStatic, svgVehicles);
+
         const add = (tag, attrs, text) => {
             const node = document.createElementNS(svgNs, tag);
             for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
             if (text !== undefined) node.textContent = text;
-            svgEl.appendChild(node);
+            svgStatic.appendChild(node);
             return node;
         };
 
@@ -381,18 +524,14 @@ const TransitMap = (() => {
             }
         }
 
-        for (const vehicle of scene.vehicles) {
-            const [x, y] = project([vehicle.lat, vehicle.lng]);
-            add('circle', {
-                cx: x.toFixed(1), cy: y.toFixed(1), r: 9,
-                fill: productColor(vehicle.product),
-                stroke: 'var(--map-stop-ring, #ffffff)', 'stroke-width': 2
-            });
+        for (const pin of scene.pins) {
+            const [x, y] = project([pin.lat, pin.lng]);
             add('text', {
-                x: x.toFixed(1), y: (y + 3.5).toFixed(1),
-                class: 'map-schematic-vehicle', 'text-anchor': 'middle'
-            }, vehicle.label);
+                x: x.toFixed(1), y: (y + 6).toFixed(1),
+                'text-anchor': 'middle', class: 'map-schematic-pin'
+            }, pin.glyph || '🏠');
         }
+
     }
 
     /**
@@ -423,11 +562,16 @@ const TransitMap = (() => {
         if (map) {
             map.remove();
             map = null;
-            layerGroup = null;
+            staticLayer = null;
+            vehicleLayer = null;
         }
+        vehicleMarkers.clear();
         svgEl = null;
+        svgStatic = null;
+        svgVehicles = null;
+        projection = null;
         mode = null;
-        scene = { routes: [], stops: [], vehicles: [], focus: null };
+        scene = { routes: [], stops: [], vehicles: [], pins: [], focus: null };
         if (container) container.innerHTML = '';
     }
 
@@ -442,6 +586,7 @@ const TransitMap = (() => {
         getBounds,
         setRoutes,
         setStops,
+        setPins,
         setVehicles,
         clear,
         fit,

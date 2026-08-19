@@ -29,8 +29,9 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
-- **Journey planner** — from your "home" station to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays
-- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Journey planner** — from your "home" station *or a street address* to anywhere in the network, including places that aren't stops: "Markthalle 9" works as a destination, and the walks at both ends are planned as real legs
+- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Falls back to a self-contained schematic when map tiles aren't reachable
+- **View switch in the header** — board, split, journey, map and LED, one click apart
 - **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
 - **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
@@ -103,6 +104,7 @@ that has **not** configured its own stations starts with what is listed here:
 | `filters` | Either explicit flags (`{"bus": false}`) or a whitelist (`["subway","tram"]`, everything else off) |
 | `activeStationId`, `splitLeftId`, `splitRightId`, `homeStationId` | Which station each view starts on |
 | `mapLive` | Poll live vehicle positions in the map view (default `true`) |
+| `homeAddress` | Journey origin as an address — `{"latitude": …, "longitude": …, "address": "…"}` or the string form `"lat,lng\|Label"` |
 | `mapTileUrl`, `mapAttribution` | Point the map at a different tile server. Deployment-only — deliberately not accepted from the URL, where a link could otherwise repoint the map at any host |
 
 Every key is optional, and unknown or malformed values are ignored rather than
@@ -138,6 +140,7 @@ https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=spl
 | `left` / `right` | — | Station IDs for the split panes |
 | `active` | — | Station ID the single view starts on |
 | `home` | — | Station ID the journey planner departs from |
+| `address` | — | Journey origin as an address: `lat,lng` or `lat,lng\|Label` |
 | `to` | `destination` | Journey destination, `<id>` or `<id>\|<name>` |
 | `live` | — | `live=0` turns off live vehicles on the map |
 | `persist` | — | `persist=1` saves the URL config to localStorage |
@@ -149,6 +152,66 @@ or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true
 
 > URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
 > has to be written `S%2BU%20Alexanderplatz`.
+
+### Finding places
+
+The destination search covers stops, addresses and points of interest. The
+operator's own POI index is thin outside well-known landmarks — *Brandenburger
+Tor* resolves, a particular market hall usually does not — so when it returns no
+actual place, the query falls back to [Photon](https://photon.komoot.io), an
+OpenStreetMap geocoder. No API key and no registration.
+
+Photon rather than Nominatim deliberately: Nominatim's usage policy forbids
+autocomplete-style querying, which is exactly what a search field does.
+
+The fallback is a third-party request, so it is deliberately narrow: it only
+fires when the transport index found no place (never on every keystroke), it is
+throttled to one request a second, and it can be switched off under
+**Einstellungen → Ortssuche**. What gets sent is the text typed into the
+destination field.
+
+### Favourites
+
+The star next to the destination saves it; saved destinations appear as chips
+under the search and are kept in localStorage. Eight at most — a list you have
+to scroll is no faster than typing the name.
+
+### When the API is down
+
+`transport.rest` is a free, hobby-run service and it does fall over. When it
+does it usually stops sending CORS headers with its error pages too, so the
+browser reports a CORS failure and an opaque `TypeError` rather than the actual
+status — which looks like a bug in this app and is not.
+
+The app handles it: requests are retried once, the board keeps showing the last
+departures it loaded (dimmed, with the time they were fetched) instead of
+blanking, and it offers to switch to the other endpoint — BVG and VBB are
+separately hosted and both cover Berlin, so one being down rarely means both.
+
+### Showing a line
+
+Type a line name into the map toolbar — `M10`, `U5`, `S41`. The lookup goes
+through `/trips?lineName=…`, which searches the **whole network**, so it finds a
+line whether or not it happens to run past the area you're looking at. Pick a
+direction and its full route and stops are drawn.
+
+### Starting journeys from your front door
+
+Set **Zuhause (Adresse)** in the settings panel and type your address — it is
+resolved through the same API (`/locations?addresses=true`) and stored in that
+browser's localStorage. The planner then offers it as an origin and every
+connection begins with the walk to the departure stop, and a home marker shows
+on the map so you can see where you are relative to whatever is drawn.
+
+For a kiosk or an embedded view, pass it in the URL instead:
+
+```
+?address=52.52151,13.41127|Alexanderplatz&to=900120025&view=journey
+```
+
+> Deliberately not part of the shipped `config.json`: this repo and its Pages
+> deployment are public, and a home address committed there is a home address
+> published. Keep it in localStorage or in a URL you don't share.
 
 ### Embedding in Home Assistant
 
@@ -378,13 +441,26 @@ Endpoints used:
 | `/stops/:id` | Resolving names and coordinates for stations given by ID |
 | `/stops/:id/departures` | The departure board |
 | `/journeys` | Journey planner (with `polylines=true` for the map) |
+| `/trips` | Finding a line by name (`lineName=M10&onlyCurrentlyRunning=true`) |
 | `/trips/:id` | A single trip's route shape (`polyline=true`) |
 | `/radar` | Live vehicle positions in the visible area |
 
-The map polls `/radar` every 15s — one request per tick regardless of how many
+The map polls `/radar` every 10s — one request per tick regardless of how many
 vehicles are in view, which is what keeps the live map inside the rate limit.
-Trip routes are fetched on demand (when you click a departure), not for every
-row on the board.
+Panning does not trigger a poll; the bounding box just follows the map and the
+next scheduled tick picks up wherever you moved to. Trip routes are fetched on
+demand (when you click a departure or look up a line), not for every row on the
+board.
+
+**Live vehicles follow what you are looking at.** With a line or a connection on
+screen, only that line's vehicles are drawn — the whole city's traffic at once is
+noise. With nothing shown, everything passes, subject to the product filter in
+the map toolbar.
+
+`/radar` caps a response at 256 vehicles. A wide view over central Berlin hits
+that, and what comes back is then an arbitrary slice that differs poll to poll —
+so the toolbar says *Ausschnitt* when the cap is reached. Zooming in narrows the
+bounding box and gets you a complete picture of a smaller area.
 
 ### Map tiles
 
