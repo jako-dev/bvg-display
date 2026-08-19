@@ -8,7 +8,7 @@
 
 // Bump this whenever a shell file changes so clients pick up the new set
 // instead of serving a stale mix of old and new files.
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 const CACHE_NAME = `bvg-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [
@@ -22,6 +22,7 @@ const SHELL_FILES = [
     './js/led-renderer.js',
     './js/map.js',
     './js/journey.js',
+    './js/geocode.js',
     './icons/icon-192.png',
     './icons/icon-512.png'
 ];

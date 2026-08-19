@@ -155,10 +155,38 @@ or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true
 
 ### Finding places
 
-The destination search covers stops, addresses and points of interest, but the
-POI index belongs to the transport operator and is thin outside well-known
-landmarks — *Brandenburger Tor* resolves, a particular market hall or restaurant
-usually does not. A street address always works, and is the reliable way in.
+The destination search covers stops, addresses and points of interest. The
+operator's own POI index is thin outside well-known landmarks — *Brandenburger
+Tor* resolves, a particular market hall usually does not — so when it returns no
+actual place, the query falls back to [Photon](https://photon.komoot.io), an
+OpenStreetMap geocoder. No API key and no registration.
+
+Photon rather than Nominatim deliberately: Nominatim's usage policy forbids
+autocomplete-style querying, which is exactly what a search field does.
+
+The fallback is a third-party request, so it is deliberately narrow: it only
+fires when the transport index found no place (never on every keystroke), it is
+throttled to one request a second, and it can be switched off under
+**Einstellungen → Ortssuche**. What gets sent is the text typed into the
+destination field.
+
+### Favourites
+
+The star next to the destination saves it; saved destinations appear as chips
+under the search and are kept in localStorage. Eight at most — a list you have
+to scroll is no faster than typing the name.
+
+### When the API is down
+
+`transport.rest` is a free, hobby-run service and it does fall over. When it
+does it usually stops sending CORS headers with its error pages too, so the
+browser reports a CORS failure and an opaque `TypeError` rather than the actual
+status — which looks like a bug in this app and is not.
+
+The app handles it: requests are retried once, the board keeps showing the last
+departures it loaded (dimmed, with the time they were fetched) instead of
+blanking, and it offers to switch to the other endpoint — BVG and VBB are
+separately hosted and both cover Berlin, so one being down rarely means both.
 
 ### Showing a line
 
