@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>Vorschau-Deployments — BVG Abfahrtsmonitor</title>
+<style>
+  :root {
+    --surface-0: #0c0d0f; --surface-1: #131519; --surface-2: #1b1e24;
+    --text-1: #f2f4f7; --text-2: #a8b0bd; --text-3: #6c7684;
+    --line: #23262d; --accent: #6aa5ff;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: var(--surface-0); color: var(--text-1);
+    padding: 48px 24px; display: flex; justify-content: center;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { width: 100%; max-width: 640px; }
+  h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; }
+  .lede { color: var(--text-3); margin: 8px 0 28px; font-size: 0.8125rem; }
+  ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  a.card {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface-1); color: var(--text-1); text-decoration: none;
+    transition: border-color 120ms, background 120ms;
+  }
+  a.card:hover { border-color: var(--accent); background: var(--surface-2); }
+  .name { font-weight: 650; word-break: break-word; }
+  .go { color: var(--text-3); flex-shrink: 0; }
+  footer { margin-top: 32px; font-size: 0.6875rem; color: var(--text-3); }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<h1>Vorschau-Deployments</h1>
+<p class="lede">Branches, die ohne Merge nach <code>main</code> veröffentlicht wurden. Werden automatisch entfernt, sobald der Branch gelöscht wird.</p>
+<ul>
+  <li><a class="card" href="./claude-default-stops-config-ckftwk/"><span class="name">claude-default-stops-config-ckftwk</span><span class="go">&rarr;</span></a></li>
+</ul>
+<footer>Die Live-Version liegt unter <a href="../">../</a>.</footer>
+</main>
+</body>
+</html>
