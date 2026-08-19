@@ -1,0 +1,5 @@
+{
+  "_readme": "Optional deployment defaults — see 'Preconfigured Stations' in README.md. Stations listed here are shown to any client that has not configured its own. Leave 'stations' empty to keep the default 'add a station' flow.",
+  "lock": false,
+  "stations": []
+}

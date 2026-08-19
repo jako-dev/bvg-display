@@ -36,6 +36,7 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Data source selector** — BVG or VBB
 - **Installable** — add-to-home-screen / installable as a standalone app, with the app shell cached for offline startup (live departure data always requires a connection)
 - **Offline-capable settings** — all settings persisted in localStorage
+- **Preconfigured stations** — ship default stations with the deployment (`config.json`) or pass them per URL, so a client that has never set anything up still sees a full board — see [Preconfigured Stations](#preconfigured-stations)
 
 ### Quick Start
 
@@ -45,6 +46,118 @@ Open the [live version](https://jako-dev.github.io/bvg-display/) or run locally:
 python3 -m http.server 8080
 # Open http://localhost:8080
 ```
+
+---
+
+## Preconfigured Stations
+
+By default the app is empty until the visitor adds a station, and everything is
+kept in that browser's localStorage. That does not work for a display you just
+want to *point at* — a wall tablet, a fresh browser profile, or a Home Assistant
+dashboard card, where nobody is going to open the settings panel first.
+
+Two config sources fix that. Both are optional and neither replaces the settings
+panel; they only decide what a client sees **before** it has settings of its own.
+
+Settings are layered in a fixed order, each overriding the one before it:
+
+```
+built-in defaults  →  config.json  →  localStorage  →  config.json (if "lock")  →  URL parameters
+```
+
+### 1. `config.json` — deployment defaults
+
+Edit `config.json` next to `index.html` in your deployment (or fork). Any client
+that has **not** configured its own stations starts with what is listed here:
+
+```json
+{
+  "lock": false,
+  "stations": [
+    { "id": "900100003", "name": "S+U Alexanderplatz", "walkTime": 4 },
+    { "id": "900120005" }
+  ],
+  "apiProvider": "v6.bvg.transport.rest",
+  "departureCount": 9,
+  "refreshInterval": 45,
+  "theme": "modern",
+  "viewMode": "single",
+  "kioskMode": false,
+  "filters": { "bus": false, "ferry": false }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `stations` | Default stations. `name` and `walkTime` are optional — a missing name is looked up from the API on first load |
+| `lock` | `true` makes this file win over the client's own saved settings — for dedicated wall displays that must always show the same stations |
+| `apiProvider` | `v6.bvg.transport.rest` or `v6.vbb.transport.rest` |
+| `departureCount` | 1–15 |
+| `refreshInterval` | 10–120 seconds |
+| `theme` | `dark` or `modern` |
+| `viewMode` | `single`, `split` or `led` |
+| `kioskMode` | `true` hides header and footer |
+| `ledScrollEnabled` / `ledScrollSpeed` | LED view scrolling (1500–8000 ms) |
+| `filters` | Either explicit flags (`{"bus": false}`) or a whitelist (`["subway","tram"]`, everything else off) |
+| `activeStationId`, `splitLeftId`, `splitRightId` | Which station each view starts on |
+
+Every key is optional, and unknown or malformed values are ignored rather than
+applied — a typo falls back to the previous layer instead of breaking the board.
+A missing `config.json` is a supported state too; the app simply has no presets.
+
+> `config.json` is fetched with revalidation and served network-first by the
+> service worker, so an edit takes effect on the next load — no cache bust needed.
+
+### 2. URL parameters — per-embed config
+
+The same settings can be passed in the query string. These win over everything
+else, and — unless you add `persist=1` — they are **not** written to
+localStorage, so embedding the board somewhere never overwrites the settings
+that browser already has.
+
+```
+https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1
+```
+
+| Parameter | Alias | Example |
+|-----------|-------|---------|
+| `stop` (repeatable) | — | `stop=900100003`, `stop=900100003\|S%2BU%20Alexanderplatz:4` |
+| `stops` | — | `stops=900100003,900120005` (comma-separated) |
+| `view` | — | `view=single` / `split` / `led` |
+| `kiosk` | — | `kiosk=1` |
+| `theme` | — | `theme=modern` |
+| `count` | `departures` | `count=9` |
+| `refresh` | `interval` | `refresh=45` |
+| `provider` | `source` | `provider=v6.vbb.transport.rest` |
+| `filter` | `filters` | `filter=subway,tram` (everything else off) |
+| `scroll` / `scrollSpeed` | — | `scroll=0`, `scrollSpeed=5000` |
+| `left` / `right` | — | Station IDs for the split panes |
+| `active` | — | Station ID the single view starts on |
+| `persist` | — | `persist=1` saves the URL config to localStorage |
+
+A stop is `<id>`, `<id>:<walkMinutes>`, `<id>|<name>` or `<id>|<name>:<walkMinutes>`.
+The name is optional — with the ID alone the app resolves the real station name
+from the API in the background. Station IDs come from the settings panel's search
+or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true`.
+
+> URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
+> has to be written `S%2BU%20Alexanderplatz`.
+
+### Embedding in Home Assistant
+
+Because the config travels in the URL, no per-client setup is needed — add a
+**Webpage card** (or an `iframe` panel) pointing at the board:
+
+```yaml
+type: iframe
+url: >-
+  https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
+aspect_ratio: 50%
+```
+
+`kiosk=1` drops the header and footer so only the departure board is left, and
+each card can carry its own stations — the same Home Assistant instance can show
+different stops on different dashboards without any of them interfering.
 
 ---
 
@@ -161,12 +274,14 @@ All runtime settings are adjustable from the config page — no reflashing neede
 ```
 bvg-display/
 ├── index.html              # Web app entry
+├── config.json             # Optional deployment defaults (preset stations)
 ├── manifest.json           # PWA manifest (install as app)
 ├── service-worker.js       # Offline app-shell cache (never caches live data)
 ├── icons/                  # PWA icons (192/512/apple-touch)
 ├── css/styles.css          # Themes & layout
 ├── js/
 │   ├── api.js              # Transport REST API wrapper
+│   ├── config.js           # config.json + URL parameter config
 │   ├── app.js              # Application logic
 │   └── led-renderer.js     # Canvas LED panel emulator
 ├── esp32/

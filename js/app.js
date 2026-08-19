@@ -44,6 +44,11 @@
     // request for a previous station can't overwrite the current one.
     let requestToken = 0;
 
+    // Set when the board is driven by URL parameters (e.g. a Home Assistant
+    // card). Such a page load is read-only: it renders what the URL asks for
+    // without writing it into this browser's saved settings.
+    let persistDisabled = false;
+
     // ===== DOM References =====
     const dom = {
         settingsPanel: document.getElementById('settings-panel'),
@@ -92,8 +97,24 @@
     };
 
     // ===== Initialization =====
-    function init() {
-        loadState();
+    async function init() {
+        // Deployment (config.json) and URL config are resolved before the first
+        // render, so a client that has never configured anything still comes up
+        // with a populated board instead of the "add a station" placeholder.
+        const config = await AppConfig.load().catch(e => {
+            console.warn('Config load failed:', e);
+            return { defaults: {}, overrides: {}, lock: false, ephemeral: false };
+        });
+
+        applySettings(config.defaults);                     // deployment defaults
+        loadState();                                        // client's own saved settings
+        if (config.lock) applySettings(config.defaults);    // locked deployment wins
+        applySettings(config.overrides);                    // URL always wins
+        // A URL-configured board is a view onto the app, not a setup step:
+        // persisting it would overwrite the settings this browser already has.
+        persistDisabled = config.ephemeral;
+        reconcileStationSelection();
+
         setupEventListeners();
         updateClock();
         setInterval(updateClock, 1000);
@@ -108,12 +129,12 @@
             enterKioskMode(false); // restore without hint
         }
 
-        if (state.stations.length > 0 && !state.activeStationId) {
-            state.activeStationId = state.stations[0].id;
-        }
-
         // Lay the view out and load it once — applyViewMode does the initial fetch.
         applyViewMode(state.viewMode, { persist: false });
+
+        // Config may name stations by ID only; fill in the labels in the
+        // background so the board doesn't wait on extra API round-trips.
+        resolveStationNames();
 
         // Pause refreshing while the tab is hidden; catch up when it returns.
         document.addEventListener('visibilitychange', () => {
@@ -128,23 +149,72 @@
     }
 
     // ===== Persistence =====
+    /**
+     * Layer a partial settings object (from config.json or the URL) onto the
+     * running state. Only keys actually present are touched, so each layer
+     * overrides the one below it without wiping anything it doesn't mention.
+     */
+    function applySettings(settings) {
+        if (!settings) return;
+
+        for (const [key, value] of Object.entries(settings)) {
+            if (key === 'filters') {
+                state.filters = { ...state.filters, ...value };
+            } else if (key === 'stations') {
+                // Config may give the ID only; the name is resolved from the
+                // API later, with the ID standing in until it arrives.
+                state.stations = value.map(s => ({
+                    id: s.id,
+                    name: s.name || s.id,
+                    walkTime: s.walkTime || 0
+                }));
+            } else {
+                state[key] = value;
+            }
+        }
+
+        if (settings.apiProvider) {
+            BvgApi.setProvider(settings.apiProvider);
+            state.apiProvider = BvgApi.getProvider();
+        }
+    }
+
+    /**
+     * Make sure the station the board points at actually exists — config,
+     * localStorage and the URL each bring their own station list, so the
+     * selection they were saved against may be gone.
+     */
+    function reconcileStationSelection() {
+        const has = (id) => id && state.stations.some(s => s.id === id);
+        if (!has(state.activeStationId)) {
+            state.activeStationId = state.stations.length > 0 ? state.stations[0].id : null;
+        }
+        if (!has(state.splitLeftId)) state.splitLeftId = null;
+        if (!has(state.splitRightId)) state.splitRightId = null;
+    }
+
     function loadState() {
         try {
             const saved = localStorage.getItem(STORAGE_KEY);
             if (!saved) return;
             const parsed = JSON.parse(saved);
-            state.stations = Array.isArray(parsed.stations) ? parsed.stations : [];
-            state.activeStationId = parsed.activeStationId || null;
-            state.departureCount = parsed.departureCount || 6;
-            state.refreshInterval = clamp(parsed.refreshInterval || 30, 10, 120);
-            state.theme = parsed.theme === 'modern' ? 'modern' : 'dark';
-            state.viewMode = ['single', 'split', 'led'].includes(parsed.viewMode) ? parsed.viewMode : 'single';
-            state.kioskMode = parsed.kioskMode || false;
-            state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
-            state.ledScrollSpeed = parsed.ledScrollSpeed || 3000;
-            state.splitLeftId = parsed.splitLeftId || null;
-            state.splitRightId = parsed.splitRightId || null;
-            state.apiProvider = parsed.apiProvider || BvgApi.DEFAULT_PROVIDER;
+            // Fall back to the current values rather than hard-coded ones:
+            // config.json defaults are already in `state` at this point and
+            // must survive keys an older saved state doesn't have.
+            if (Array.isArray(parsed.stations) && parsed.stations.length > 0) {
+                state.stations = parsed.stations;
+                state.activeStationId = parsed.activeStationId || null;
+                state.splitLeftId = parsed.splitLeftId || null;
+                state.splitRightId = parsed.splitRightId || null;
+            }
+            state.departureCount = parsed.departureCount || state.departureCount;
+            state.refreshInterval = clamp(parsed.refreshInterval || state.refreshInterval, 10, 120);
+            if (parsed.theme) state.theme = parsed.theme === 'modern' ? 'modern' : 'dark';
+            if (['single', 'split', 'led'].includes(parsed.viewMode)) state.viewMode = parsed.viewMode;
+            if (parsed.kioskMode !== undefined) state.kioskMode = !!parsed.kioskMode;
+            if (parsed.ledScrollEnabled !== undefined) state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
+            state.ledScrollSpeed = parsed.ledScrollSpeed || state.ledScrollSpeed;
+            state.apiProvider = parsed.apiProvider || state.apiProvider;
             state.filters = { ...state.filters, ...parsed.filters };
             BvgApi.setProvider(state.apiProvider);
             // setProvider ignores unknown hosts — mirror back what it accepted.
@@ -155,6 +225,7 @@
     }
 
     function saveState() {
+        if (persistDisabled) return;
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
                 stations: state.stations,
@@ -435,6 +506,50 @@
         renderSplitStationSelects();
         renderStationTabs();
         refreshCurrentView();
+    }
+
+    /**
+     * Config can list stations by ID alone (`?stop=900000100003`), which is the
+     * only form available before the user has searched for anything. Look the
+     * real names up in the background and refresh the labels once they land —
+     * the board itself already works, the ID is just an ugly placeholder.
+     */
+    async function resolveStationNames() {
+        const pending = state.stations.filter(s => !s.name || s.name === s.id);
+        if (pending.length === 0) return;
+
+        let resolved = false;
+        for (const station of pending) {
+            try {
+                const data = await BvgApi.getStation(station.id);
+                const name = data && (data.name || (data.stop && data.stop.name));
+                if (name) {
+                    station.name = name;
+                    resolved = true;
+                }
+            } catch (e) {
+                console.warn(`Could not resolve name for station ${station.id}:`, e.message);
+            }
+        }
+        if (!resolved) return;
+
+        saveState();
+        renderSavedStations();
+        renderSplitStationSelects();
+        renderStationTabs();
+        updateStationHeadings();
+    }
+
+    /** Re-label the headers for whichever view is currently on screen */
+    function updateStationHeadings() {
+        if (state.viewMode === 'single') {
+            const station = getActiveStation();
+            if (station) dom.currentStationName.textContent = station.name;
+        } else if (state.viewMode === 'split') {
+            const { left, right } = getSplitStations();
+            if (left) dom.splitHeaderLeft.textContent = left.name;
+            if (right) dom.splitHeaderRight.textContent = right.name;
+        }
     }
 
     function renderSavedStations() {
