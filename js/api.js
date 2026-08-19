@@ -158,12 +158,147 @@ const BvgApi = (() => {
         return rateLimitedFetch(`${baseUrl}/stops/${encodeURIComponent(stationId)}?${params}`);
     }
 
+    /**
+     * Plan journeys from one station to another.
+     * @param {string} fromId - Origin station ID
+     * @param {string} toId - Destination station ID
+     * @param {Object} filters - Transport type filters
+     * @param {Object} [opt]
+     * @param {number} [opt.results=4] - Number of journeys to return
+     * @param {number} [opt.transfers] - Max transfers (-1 = unlimited)
+     * @param {boolean} [opt.polylines=false] - Include a shape per leg
+     * @param {Date|string} [opt.departure] - Depart at this time instead of now
+     * @returns {Promise<Object>} { journeys: [...] }
+     */
+    async function getJourneys(fromId, toId, filters = {}, opt = {}) {
+        const params = new URLSearchParams({
+            from: String(fromId),
+            to: String(toId),
+            results: String(opt.results || 4),
+            stopovers: 'false',
+            remarks: 'true',
+            polylines: opt.polylines ? 'true' : 'false',
+            pretty: 'false',
+            language: 'de'
+        });
+
+        // -1 means "as many transfers as needed"; the API rejects it as a count,
+        // so it is simply left out and HAFAS applies its own default.
+        if (typeof opt.transfers === 'number' && opt.transfers >= 0) {
+            params.set('transfers', String(opt.transfers));
+        }
+        if (opt.departure) {
+            const when = opt.departure instanceof Date ? opt.departure.toISOString() : opt.departure;
+            params.set('departure', when);
+        }
+
+        for (const product of PRODUCTS) {
+            if (filters[product] !== undefined) {
+                params.set(product, String(filters[product]));
+            }
+        }
+
+        return rateLimitedFetch(`${baseUrl}/journeys?${params}`);
+    }
+
+    /**
+     * Get a single trip, optionally with its geographic shape. Trip IDs contain
+     * '|' and other reserved characters, so the path segment must be encoded.
+     * @param {string} tripId
+     * @param {boolean} [withPolyline=true]
+     * @returns {Promise<Object>} { trip: {...} }
+     */
+    async function getTrip(tripId, withPolyline = true) {
+        const params = new URLSearchParams({
+            stopovers: 'true',
+            remarks: 'false',
+            polyline: withPolyline ? 'true' : 'false',
+            pretty: 'false',
+            language: 'de'
+        });
+        return rateLimitedFetch(`${baseUrl}/trips/${encodeURIComponent(tripId)}?${params}`);
+    }
+
+    /**
+     * Find every vehicle currently moving inside a bounding box.
+     * One request covers the whole visible area no matter how many vehicles
+     * are in it, which is what makes a live map affordable under the rate limit.
+     * @param {{north: number, west: number, south: number, east: number}} bbox
+     * @param {Object} [opt]
+     * @param {number} [opt.results=128] - Max vehicles
+     * @param {number} [opt.duration=30] - Seconds of movement to compute
+     * @param {number} [opt.frames=3] - Interpolation frames within `duration`
+     * @param {boolean} [opt.polylines=false] - Include each vehicle's track
+     * @returns {Promise<Object>} { movements: [...] }
+     */
+    async function getRadar(bbox, opt = {}) {
+        const params = new URLSearchParams({
+            north: String(bbox.north),
+            west: String(bbox.west),
+            south: String(bbox.south),
+            east: String(bbox.east),
+            results: String(opt.results || 128),
+            duration: String(opt.duration || 30),
+            frames: String(opt.frames || 3),
+            polylines: opt.polylines ? 'true' : 'false',
+            pretty: 'false',
+            language: 'de'
+        });
+        return rateLimitedFetch(`${baseUrl}/radar?${params}`);
+    }
+
+    /**
+     * Flatten a hafas-client polyline into Leaflet-style [lat, lng] pairs.
+     * The API returns a GeoJSON FeatureCollection of Points whose coordinates
+     * are [longitude, latitude] — the opposite order from Leaflet's.
+     * @param {Object} polyline - GeoJSON FeatureCollection
+     * @returns {Array<[number, number]>}
+     */
+    function polylineToLatLngs(polyline) {
+        const features = polyline && Array.isArray(polyline.features) ? polyline.features : [];
+        const points = [];
+        for (const feature of features) {
+            const coords = feature && feature.geometry && feature.geometry.coordinates;
+            if (!Array.isArray(coords) || coords.length < 2) continue;
+            const [lng, lat] = coords;
+            if (typeof lat === 'number' && typeof lng === 'number') points.push([lat, lng]);
+        }
+        return points;
+    }
+
+    /**
+     * The stations along a polyline, in order — the dots drawn on the route.
+     * @param {Object} polyline - GeoJSON FeatureCollection
+     * @returns {Array<{id: string, name: string, lat: number, lng: number}>}
+     */
+    function polylineStations(polyline) {
+        const features = polyline && Array.isArray(polyline.features) ? polyline.features : [];
+        const stations = [];
+        for (const feature of features) {
+            const props = feature && feature.properties;
+            const coords = feature && feature.geometry && feature.geometry.coordinates;
+            if (!props || !props.name || !Array.isArray(coords) || coords.length < 2) continue;
+            stations.push({
+                id: props.id ? String(props.id) : '',
+                name: props.name,
+                lat: coords[1],
+                lng: coords[0]
+            });
+        }
+        return stations;
+    }
+
     return {
         PRODUCTS,
         DEFAULT_PROVIDER,
         searchStations,
         getDepartures,
         getStation,
+        getJourneys,
+        getTrip,
+        getRadar,
+        polylineToLatLngs,
+        polylineStations,
         setProvider,
         getProvider,
         getProviders
