@@ -29,8 +29,9 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
-- **Journey planner** — from your "home" station to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays
-- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Journey planner** — from your "home" station *or a street address* to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays. With an address, the walk to the departure stop is planned as a real leg
+- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Pick any line running nearby and follow it, whether or not you have its stop saved. Falls back to a self-contained schematic when map tiles aren't reachable
+- **View switch in the header** — board, split, journey, map and LED, one click apart
 - **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
 - **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
@@ -103,6 +104,7 @@ that has **not** configured its own stations starts with what is listed here:
 | `filters` | Either explicit flags (`{"bus": false}`) or a whitelist (`["subway","tram"]`, everything else off) |
 | `activeStationId`, `splitLeftId`, `splitRightId`, `homeStationId` | Which station each view starts on |
 | `mapLive` | Poll live vehicle positions in the map view (default `true`) |
+| `homeAddress` | Journey origin as an address — `{"latitude": …, "longitude": …, "address": "…"}` or the string form `"lat,lng\|Label"` |
 | `mapTileUrl`, `mapAttribution` | Point the map at a different tile server. Deployment-only — deliberately not accepted from the URL, where a link could otherwise repoint the map at any host |
 
 Every key is optional, and unknown or malformed values are ignored rather than
@@ -138,6 +140,7 @@ https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=spl
 | `left` / `right` | — | Station IDs for the split panes |
 | `active` | — | Station ID the single view starts on |
 | `home` | — | Station ID the journey planner departs from |
+| `address` | — | Journey origin as an address: `lat,lng` or `lat,lng\|Label` |
 | `to` | `destination` | Journey destination, `<id>` or `<id>\|<name>` |
 | `live` | — | `live=0` turns off live vehicles on the map |
 | `persist` | — | `persist=1` saves the URL config to localStorage |
@@ -149,6 +152,23 @@ or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true
 
 > URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
 > has to be written `S%2BU%20Alexanderplatz`.
+
+### Starting journeys from your front door
+
+Set **Zuhause (Adresse)** in the settings panel and type your address — it is
+resolved through the same API (`/locations?addresses=true`) and stored in that
+browser's localStorage. The planner then offers it as an origin and every
+connection begins with the walk to the departure stop.
+
+For a kiosk or an embedded view, pass it in the URL instead:
+
+```
+?address=52.52054,13.45587|Mühsamstr.%2039&to=900100003&view=journey
+```
+
+> Deliberately not part of the shipped `config.json`: this repo and its Pages
+> deployment are public, and a home address committed there is a home address
+> published. Keep it in localStorage or in a URL you don't share.
 
 ### Embedding in Home Assistant
 
@@ -383,8 +403,14 @@ Endpoints used:
 
 The map polls `/radar` every 15s — one request per tick regardless of how many
 vehicles are in view, which is what keeps the live map inside the rate limit.
-Trip routes are fetched on demand (when you click a departure), not for every
-row on the board.
+Trip routes are fetched on demand (when you click a departure or pick a line),
+not for every row on the board.
+
+Between those polls the vehicles keep moving: `/radar` returns interpolation
+frames describing where each one travels over the following seconds, and the
+map redraws along them five times a second. The movement you see is smooth
+without the request rate changing at all. Panning the map re-polls, since the
+radar query is bounded by the visible area.
 
 ### Map tiles
 
