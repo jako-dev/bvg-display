@@ -82,6 +82,16 @@ const JourneyView = (() => {
 
     const isCancelled = (journey) => (journey.legs || []).some(leg => leg.cancelled === true);
 
+    /**
+     * Class for an individual line's own colour (u5, s41, ...), matching the
+     * board's badges so the same line looks the same in every view.
+     */
+    function lineClass(line) {
+        if (!line || !line.name) return '';
+        const name = line.name.toLowerCase().replace(/\s/g, '');
+        return /^[us]\d+$/.test(name) ? name : '';
+    }
+
     function legBadgeHtml(leg) {
         if (leg.walking) {
             const distance = leg.distance ? ` ${Math.round(leg.distance)} m` : '';
@@ -92,7 +102,7 @@ const JourneyView = (() => {
         }
         const line = leg.line || {};
         const product = line.product || '';
-        return `<span class="leg-chip leg-line ${escapeHtml(product)}" title="${escapeHtml(PRODUCT_LABELS[product] || product)}">
+        return `<span class="leg-chip leg-line line-tint ${escapeHtml(product)} ${lineClass(line)}" title="${escapeHtml(PRODUCT_LABELS[product] || product)}">
                     ${escapeHtml(line.name || '?')}
                 </span>`;
     }

@@ -942,7 +942,7 @@
         return `
             <div class="${rowClass}"${tripAttrs}>
                 <span class="col-line">
-                    <span class="line-badge ${escapeHtml(lineProduct)} ${lineClass}">${escapeHtml(lineName)}</span>
+                    <span class="line-badge line-tint ${escapeHtml(lineProduct)} ${lineClass}">${escapeHtml(lineName)}</span>
                 </span>
                 <span class="col-destination">${escapeHtml(dep.direction || 'Unbekannt')}</span>
                 <span class="col-platform">${escapeHtml(platform)}</span>
