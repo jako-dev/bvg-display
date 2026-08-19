@@ -29,8 +29,10 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
-- **Views**: Single, Split (two stations side-by-side, each independently selectable), LED emulator
-- **Themes**: Classic Dark, Modern (Catppuccin)
+- **Journey planner** — from your "home" station to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays
+- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
+- **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
 - **Auto-refresh** — configurable interval (10–120s)
 - **Data source selector** — BVG or VBB
@@ -99,7 +101,9 @@ that has **not** configured its own stations starts with what is listed here:
 | `kioskMode` | `true` hides header and footer |
 | `ledScrollEnabled` / `ledScrollSpeed` | LED view scrolling (1500–8000 ms) |
 | `filters` | Either explicit flags (`{"bus": false}`) or a whitelist (`["subway","tram"]`, everything else off) |
-| `activeStationId`, `splitLeftId`, `splitRightId` | Which station each view starts on |
+| `activeStationId`, `splitLeftId`, `splitRightId`, `homeStationId` | Which station each view starts on |
+| `mapLive` | Poll live vehicle positions in the map view (default `true`) |
+| `mapTileUrl`, `mapAttribution` | Point the map at a different tile server. Deployment-only — deliberately not accepted from the URL, where a link could otherwise repoint the map at any host |
 
 Every key is optional, and unknown or malformed values are ignored rather than
 applied — a typo falls back to the previous layer instead of breaking the board.
@@ -133,6 +137,9 @@ https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=spl
 | `scroll` / `scrollSpeed` | — | `scroll=0`, `scrollSpeed=5000` |
 | `left` / `right` | — | Station IDs for the split panes |
 | `active` | — | Station ID the single view starts on |
+| `home` | — | Station ID the journey planner departs from |
+| `to` | `destination` | Journey destination, `<id>` or `<id>\|<name>` |
+| `live` | — | `live=0` turns off live vehicles on the map |
 | `persist` | — | `persist=1` saves the URL config to localStorage |
 
 A stop is `<id>`, `<id>:<walkMinutes>`, `<id>|<name>` or `<id>|<name>:<walkMinutes>`.
@@ -283,7 +290,11 @@ bvg-display/
 │   ├── api.js              # Transport REST API wrapper
 │   ├── config.js           # config.json + URL parameter config
 │   ├── app.js              # Application logic
+│   ├── journey.js          # Connection list rendering
+│   ├── map.js              # Leaflet map + SVG schematic fallback
 │   └── led-renderer.js     # Canvas LED panel emulator
+├── vendor/
+│   └── leaflet/            # Leaflet 1.9.4 (BSD-2-Clause), lazy-loaded
 ├── esp32/
 │   ├── platformio.ini      # PlatformIO config
 │   └── src/
@@ -309,6 +320,34 @@ Uses the public [transport.rest](https://transport.rest/) APIs:
 - No API key required
 - Rate limit: ~100 requests/minute
 - CORS enabled (browser-friendly)
+
+Endpoints used:
+
+| Endpoint | Used for |
+|----------|----------|
+| `/locations` | Station search |
+| `/stops/:id` | Resolving names and coordinates for stations given by ID |
+| `/stops/:id/departures` | The departure board |
+| `/journeys` | Journey planner (with `polylines=true` for the map) |
+| `/trips/:id` | A single trip's route shape (`polyline=true`) |
+| `/radar` | Live vehicle positions in the visible area |
+
+The map polls `/radar` every 15s — one request per tick regardless of how many
+vehicles are in view, which is what keeps the live map inside the rate limit.
+Trip routes are fetched on demand (when you click a departure), not for every
+row on the board.
+
+### Map tiles
+
+Map tiles come from OpenStreetMap by default. That is a shared, donated
+resource with a [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) —
+fine for a personal dashboard, not for anything high-traffic. Point
+`mapTileUrl` in `config.json` at your own tile server if you need more.
+
+If tiles can't be reached at all — offline, blocked, or the tile server is
+down — the map falls back to a self-contained SVG schematic drawn from the same
+coordinates. Routes, stops and vehicles still render; only the streets are
+missing.
 
 ## Troubleshooting
 
