@@ -13,7 +13,7 @@
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
-    const RADAR_INTERVAL_MS = 15000; // Live vehicle poll — one request per tick
+    const RADAR_INTERVAL_MS = 10000; // Live vehicle poll — one request per tick
     const RADAR_MAX_VEHICLES = 80;
 
     // ===== State =====
@@ -34,6 +34,10 @@
         homeAddress: null,      // Optional street address origin {address, latitude, longitude}
         destination: null,      // Journey target {id, name}
         mapLive: true,          // Poll /radar for live vehicles in the map view
+        mapFilters: {           // Which products show as live vehicles on the map
+            suburban: true, subway: true, tram: true,
+            bus: true, ferry: true, express: true, regional: true
+        },
         mapTileUrl: null,       // Override the tile server (config.json only)
         mapAttribution: null,   // Attribution shown for that tile server
         apiProvider: BvgApi.DEFAULT_PROVIDER,
@@ -66,6 +70,10 @@
     let mapReady = false;
     let mapInitPromise = null;
     let shownRoute = null;   // { tripId, label } of the trip route on the map
+    // Lines the map is currently about — a shown line, or the lines of a shown
+    // connection. Live vehicles are narrowed to these: seeing every tram in
+    // Berlin is noise, seeing the ones on the route you're looking at is not.
+    let mapFocus = null;
     // Set by whatever triggered the map (a journey, a departure row) and
     // consumed once the map view is actually up.
     let pendingMapScene = null;
@@ -136,7 +144,9 @@
         mapContainer: document.getElementById('map-container'),
         mapTitle: document.getElementById('map-title'),
         mapLiveToggle: document.getElementById('map-live-toggle'),
-        mapLineSelect: document.getElementById('map-line-select'),
+        mapLineInput: document.getElementById('map-line-input'),
+        mapLineResults: document.getElementById('map-line-results'),
+        mapFilters: document.getElementById('map-filters'),
         mapFit: document.getElementById('map-fit'),
         mapClear: document.getElementById('map-clear'),
         mapStatus: document.getElementById('map-status'),
@@ -175,6 +185,7 @@
         renderStationTabs();
         renderHomeAddress();
         renderJourneyControls();
+        renderMapFilters();
         updateDataSourceLabel();
 
         if (state.kioskMode) {
@@ -212,6 +223,8 @@
         for (const [key, value] of Object.entries(settings)) {
             if (key === 'filters') {
                 state.filters = { ...state.filters, ...value };
+            } else if (key === 'mapFilters') {
+                state.mapFilters = { ...state.mapFilters, ...value };
             } else if (key === 'stations') {
                 // Config may give the ID only; the name is resolved from the
                 // API later, with the ID standing in until it arrives.
@@ -281,7 +294,11 @@
             state.ledScrollSpeed = parsed.ledScrollSpeed || state.ledScrollSpeed;
             state.apiProvider = parsed.apiProvider || state.apiProvider;
             if (parsed.mapLive !== undefined) state.mapLive = parsed.mapLive !== false;
-            if (parsed.destination && parsed.destination.id) state.destination = parsed.destination;
+            state.mapFilters = { ...state.mapFilters, ...parsed.mapFilters };
+            if (parsed.destination && (parsed.destination.id
+                    || (isFinite(parsed.destination.latitude) && isFinite(parsed.destination.longitude)))) {
+                state.destination = parsed.destination;
+            }
             if (parsed.homeAddress && isFinite(parsed.homeAddress.latitude) && isFinite(parsed.homeAddress.longitude)) {
                 state.homeAddress = parsed.homeAddress;
             }
@@ -313,6 +330,7 @@
                 homeAddress: state.homeAddress,
                 destination: state.destination,
                 mapLive: state.mapLive,
+                mapFilters: state.mapFilters,
                 apiProvider: state.apiProvider,
                 filters: state.filters
             }));
@@ -356,6 +374,7 @@
                 dom.searchResults.classList.add('hidden');
                 dom.journeyToResults.classList.add('hidden');
                 dom.homeAddressResults.classList.add('hidden');
+                dom.mapLineResults.classList.add('hidden');
             }
             if (dom.settingsPanel.classList.contains('open') &&
                 !dom.settingsPanel.contains(e.target) &&
@@ -490,6 +509,7 @@
             saveState();
             renderHomeAddress();
             renderJourneyControls();
+            renderHomePin();
             if (state.viewMode === 'journey' && state.destination) fetchJourneys();
         });
 
@@ -501,6 +521,7 @@
             saveState();
             renderHomeAddress();
             renderJourneyControls();
+            renderHomePin();
         });
 
         let destTimeout;
@@ -515,9 +536,13 @@
         });
 
         dom.journeyToResults.addEventListener('click', (e) => {
-            const item = e.target.closest('.search-result-item[data-id]');
+            const item = e.target.closest('.search-result-item[data-name]');
             if (!item) return;
-            state.destination = { id: item.dataset.id, name: item.dataset.name };
+            const lat = parseFloat(item.dataset.lat);
+            const lng = parseFloat(item.dataset.lng);
+            state.destination = item.dataset.kind === 'stop' && item.dataset.id
+                ? { id: item.dataset.id, name: item.dataset.name }
+                : { name: item.dataset.name, latitude: lat, longitude: lng };
             dom.journeyTo.value = item.dataset.name;
             dom.journeyToResults.classList.add('hidden');
             saveState();
@@ -558,33 +583,57 @@
                 stopRadarTimer();
                 liveVehicles = [];
                 TransitMap.setVehicles([]);
-                renderLinePicker();
             }
         });
-        // Follow any line that's running right now — independent of the saved
-        // stations, so you can watch a tram you have no stop for.
-        dom.mapLineSelect.addEventListener('change', (e) => {
-            const tripId = e.target.value;
-            if (!tripId) {
-                shownRoute = null;
-                TransitMap.setRoutes([]);
-                TransitMap.setStops([]);
-                dom.mapTitle.textContent = 'Karte';
+        // Show any line's route by name — independent of the saved stations and
+        // of what happens to be on screen.
+        let lineTimeout;
+        dom.mapLineInput.addEventListener('input', (e) => {
+            clearTimeout(lineTimeout);
+            const query = e.target.value.trim();
+            if (query.length < 1) {
+                dom.mapLineResults.classList.add('hidden');
                 return;
             }
-            const vehicle = liveVehicles.find(v => v.tripId === tripId);
-            showTripOnMap(tripId, vehicle ? `${vehicle.label} → ${vehicle.direction || '?'}` : '');
+            lineTimeout = setTimeout(() => searchMapLine(query), SEARCH_DEBOUNCE_MS);
+        });
+
+        dom.mapLineInput.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            clearTimeout(lineTimeout);
+            const first = dom.mapLineResults.querySelector('.search-result-item[data-trip-id]');
+            if (first) first.click();
+            else if (e.target.value.trim()) searchMapLine(e.target.value.trim());
+        });
+
+        dom.mapLineResults.addEventListener('click', (e) => {
+            const item = e.target.closest('.search-result-item[data-trip-id]');
+            if (!item) return;
+            dom.mapLineResults.classList.add('hidden');
+            showTripOnMap(item.dataset.tripId, item.dataset.label || '');
+        });
+
+        // Product filters — which live vehicles are drawn.
+        dom.mapFilters.addEventListener('click', (e) => {
+            const btn = e.target.closest('.map-filter[data-product]');
+            if (!btn) return;
+            const product = btn.dataset.product;
+            state.mapFilters[product] = state.mapFilters[product] === false;
+            saveState();
+            renderMapFilters();
+            applyMapFilters();
         });
 
         dom.mapFit.addEventListener('click', () => TransitMap.fit());
         dom.mapClear.addEventListener('click', () => {
             shownRoute = null;
             selectedJourney = -1;
-            dom.mapLineSelect.value = '';
+            dom.mapLineInput.value = '';
+            dom.mapLineResults.classList.add('hidden');
             TransitMap.setRoutes([]);
             TransitMap.setStops([]);
             dom.mapTitle.textContent = 'Karte';
-            setMapStatus('');
+            setMapFocus([]);
         });
 
         // A departure row opens that trip's route on the map.
@@ -1220,6 +1269,7 @@
             // map is created/measured here rather than up front.
             initMapView().then(() => {
                 TransitMap.refresh(); // the container only has a size now
+                renderHomePin();
                 applyPendingMapScene();
                 if (state.mapLive) {
                     fetchRadar();
@@ -1426,16 +1476,33 @@
         }
     }
 
+    const PLACE_KIND_LABELS = { stop: '', poi: 'Ort', address: 'Adresse' };
+
+    /**
+     * Destination search covers stops, points of interest and addresses — you
+     * travel to "Markthalle 9", not to whichever stop happens to be near it.
+     * A non-stop destination is sent as coordinates and the API works out the
+     * final walk itself.
+     */
     async function searchDestination(query) {
         try {
-            const results = await BvgApi.searchStations(query);
+            const results = await BvgApi.searchPlaces(query, {
+                stops: true, addresses: true, poi: true, results: 10
+            });
+
             if (results.length === 0) {
                 dom.journeyToResults.innerHTML = '<div class="search-result-item">Keine Ergebnisse</div>';
             } else {
-                dom.journeyToResults.innerHTML = results.map(stop => `
-                    <div class="search-result-item" data-id="${escapeHtml(stop.id)}" data-name="${escapeHtml(stop.name)}">
-                        <div>${escapeHtml(stop.name)}</div>
-                        <div class="result-products">${getProductBadges(stop.products)}</div>
+                dom.journeyToResults.innerHTML = results.map(place => `
+                    <div class="search-result-item"
+                         data-kind="${escapeHtml(place.kind)}"
+                         data-id="${escapeHtml(place.id)}"
+                         data-name="${escapeHtml(place.name)}"
+                         data-lat="${place.latitude}" data-lng="${place.longitude}">
+                        <div>${escapeHtml(place.name)}</div>
+                        <div class="result-products">${place.kind === 'stop'
+                            ? getProductBadges(place.products)
+                            : `<span class="result-kind">${escapeHtml(PLACE_KIND_LABELS[place.kind])}</span>`}</div>
                     </div>
                 `).join('');
             }
@@ -1445,6 +1512,21 @@
             dom.journeyToResults.innerHTML = '<div class="search-result-item">Fehler bei der Suche</div>';
             dom.journeyToResults.classList.remove('hidden');
         }
+    }
+
+    /**
+     * The destination in the form the API wants: a stop goes by ID, anything
+     * else by coordinates.
+     * @returns {string|Object|null}
+     */
+    function destinationPlace() {
+        const dest = state.destination;
+        if (!dest) return null;
+        if (dest.id) return dest.id;
+        if (isFinite(dest.latitude) && isFinite(dest.longitude)) {
+            return { latitude: dest.latitude, longitude: dest.longitude, address: dest.name };
+        }
+        return null;
     }
 
     function showJourneyMessage(html) {
@@ -1457,11 +1539,12 @@
             showJourneyMessage('<p>Bitte zuerst eine Station oder eine Adresse in den Einstellungen speichern.</p>');
             return;
         }
-        if (!state.destination || !state.destination.id) {
+        const destination = destinationPlace();
+        if (!destination) {
             showJourneyMessage('<p>Bitte ein Ziel ausw&auml;hlen.</p>');
             return;
         }
-        if (state.destination.id === origin.place) {
+        if (typeof destination === 'string' && destination === origin.place) {
             showJourneyMessage('<p>Start und Ziel sind dieselbe Station.</p>');
             return;
         }
@@ -1477,7 +1560,7 @@
                 ? new Date(Date.now() + origin.walkTime * 60000)
                 : null;
 
-            const data = await BvgApi.getJourneys(origin.place, state.destination.id, state.filters, {
+            const data = await BvgApi.getJourneys(origin.place, destination, state.filters, {
                 results: 5,
                 polylines: true,
                 departure
@@ -1516,6 +1599,9 @@
         // If the map was already up, applyViewMode's init promise resolves
         // immediately — but the scene still has to be pushed through it.
         initMapView().then(applyPendingMapScene);
+        setMapFocus((journey.legs || [])
+            .filter(leg => !leg.walking && leg.line)
+            .map(leg => leg.line.name));
     }
 
     // ===== Map =====
@@ -1551,15 +1637,24 @@
         }).then((backend) => {
             mapReady = true;
             if (backend === 'leaflet') setMapStatus('');
-            // Radar is bounded by what's on screen, so panning somewhere else
-            // should show what runs there rather than what ran where you were.
-            TransitMap.onViewChange(() => {
-                if (state.viewMode === 'map' && state.mapLive) fetchRadar();
-            });
+            // Deliberately no re-poll on pan: it also fired on the programmatic
+            // fit() after drawing a route, so a single click could trigger
+            // several requests. The bounding box still follows the map — the
+            // next scheduled poll simply picks up wherever you've moved to.
             return backend;
         });
 
         return mapInitPromise;
+    }
+
+    /** Show where home is, if one is set — context for everything else drawn. */
+    function renderHomePin() {
+        if (!mapReady) return;
+        TransitMap.setPins(state.homeAddress ? [{
+            lat: state.homeAddress.latitude,
+            lng: state.homeAddress.longitude,
+            label: `Zuhause · ${state.homeAddress.address}`
+        }] : []);
     }
 
     function applyPendingMapScene() {
@@ -1599,6 +1694,8 @@
 
             const stations = BvgApi.polylineStations(trip.polyline);
             dom.mapTitle.textContent = label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim();
+            // From here on, "live" means this line rather than the whole city.
+            setMapFocus([(trip.line && trip.line.name) || '']);
             TransitMap.setRoutes([{
                 points,
                 product: (trip.line && trip.line.product) || '',
@@ -1609,7 +1706,6 @@
                 kind: i === 0 ? 'origin' : (i === stations.length - 1 ? 'destination' : 'stop')
             })));
             TransitMap.fit();
-            setMapStatus('');
         } catch (e) {
             if (token !== requestToken) return;
             console.error('Trip route failed:', e);
@@ -1660,8 +1756,7 @@
 
             const movements = Array.isArray(data.movements) ? data.movements : [];
             liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
-            TransitMap.setVehicles(liveVehicles);
-            renderLinePicker();
+            applyMapFilters();
             updateLastRefreshTime();
         } catch (e) {
             console.warn('Radar poll failed:', e.message);
@@ -1669,79 +1764,128 @@
         }
     }
 
-    /** A frame endpoint is either a stop (with .location) or a bare location. */
-    function frameCoords(point) {
-        const loc = (point && point.location) || point;
-        if (!loc || !isFinite(loc.latitude) || !isFinite(loc.longitude)) return null;
-        return [loc.latitude, loc.longitude];
-    }
-
     /**
-     * One radar movement in the shape the map wants, including its frames —
-     * the short segments the API says it will travel next, which is what lets
-     * the map animate between polls instead of jumping once per request.
+     * One radar movement in the shape the map wants.
+     * @returns {Object}
      */
     function toVehicle(movement) {
         const line = movement.line || {};
-        const frames = [];
-        for (const frame of movement.frames || []) {
-            const from = frameCoords(frame.origin);
-            const to = frameCoords(frame.destination);
-            if (from && to && typeof frame.t === 'number') frames.push({ from, to, t: frame.t });
-        }
-        frames.sort((a, b) => a.t - b.t);
-
         return {
+            // Keyed by trip so the marker is moved on the next poll rather than
+            // destroyed and recreated, which made the whole fleet flicker.
             key: movement.tripId ? String(movement.tripId) : `${line.name || '?'}|${movement.direction || ''}`,
             tripId: movement.tripId ? String(movement.tripId) : '',
             lat: movement.location && movement.location.latitude,
             lng: movement.location && movement.location.longitude,
             label: line.name || '?',
             product: line.product || '',
-            direction: movement.direction || '',
-            frames
+            direction: movement.direction || ''
         };
     }
 
     /**
-     * Fill the "follow a line" dropdown from whatever is running right now.
-     * Rebuilt on every poll, so the open selection has to be preserved by hand.
+     * Draw the vehicles that are relevant right now: those of the line or
+     * connection on screen, or — when nothing is shown — everything that
+     * passes the product filter.
      */
-    function renderLinePicker() {
-        const previous = dom.mapLineSelect.value;
-        const seen = new Set();
-        const byProduct = new Map();
+    function applyMapFilters() {
+        const focused = mapFocus && mapFocus.lines && mapFocus.lines.size > 0;
+        const vehicles = liveVehicles.filter(v => focused
+            ? mapFocus.lines.has(normaliseLine(v.label))
+            : state.mapFilters[v.product] !== false);
 
-        for (const vehicle of liveVehicles) {
-            if (!vehicle.tripId) continue; // without a trip there is no route to draw
-            const label = `${vehicle.label} → ${vehicle.direction || '?'}`;
-            if (seen.has(label)) continue;
-            seen.add(label);
-            const group = PRODUCT_LABELS[vehicle.product] || 'Sonstige';
-            if (!byProduct.has(group)) byProduct.set(group, []);
-            byProduct.get(group).push({ value: vehicle.tripId, label });
+        TransitMap.setVehicles(vehicles);
+        dom.mapFilters.classList.toggle('is-muted', !!focused);
+        updateLiveNote(focused, vehicles.length);
+    }
+
+    const normaliseLine = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+
+    function setMapFocus(lineNames) {
+        const names = (lineNames || []).map(normaliseLine).filter(Boolean);
+        mapFocus = names.length > 0 ? { lines: new Set(names) } : null;
+        applyMapFilters();
+    }
+
+    /**
+     * Say what "live" currently means, so the filter chips aren't confusing.
+     * Composed with the fallback note rather than replacing it — being on the
+     * schematic is the more important of the two facts.
+     */
+    function updateLiveNote(focused, count) {
+        let live = '';
+        if (state.mapLive) {
+            if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
+            else if (count > 0) live = `Live: ${count} Fahrzeuge`;
         }
+        setMapStatus([mapFallbackNote, live].filter(Boolean).join(' · '));
+    }
 
-        const groups = [...byProduct.entries()].sort((a, b) => a[0].localeCompare(b[0], 'de'));
-        const options = groups.map(([group, entries]) => {
-            const sorted = entries.sort((a, b) => a.label.localeCompare(b.label, 'de', { numeric: true }));
-            return `<optgroup label="${escapeHtml(group)}">${sorted.map(entry =>
-                `<option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>`
-            ).join('')}</optgroup>`;
-        }).join('');
-
-        const placeholder = liveVehicles.length === 0
-            ? 'Keine Fahrzeuge in Sicht'
-            : `Linie verfolgen… (${seen.size})`;
-        dom.mapLineSelect.innerHTML = `<option value="">${placeholder}</option>${options}`;
-
-        // Keep the tracked trip selected across refreshes; if it has finished
-        // its run and dropped out of the feed, fall back to the placeholder.
-        const wanted = (shownRoute && shownRoute.tripId) || previous;
-        if (wanted && dom.mapLineSelect.querySelector(`option[value="${CSS.escape(wanted)}"]`)) {
-            dom.mapLineSelect.value = wanted;
+    function renderMapFilters() {
+        for (const btn of dom.mapFilters.querySelectorAll('.map-filter[data-product]')) {
+            const on = state.mapFilters[btn.dataset.product] !== false;
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
         }
-        dom.mapLineSelect.disabled = seen.size === 0;
+    }
+
+    // ===== Line lookup =====
+
+    /**
+     * Find a line by name anywhere in the network and offer its directions.
+     *
+     * The radar feed only knows what is inside the current map viewport, which
+     * is why a line that happens not to be running past you was missing from
+     * the old picker. /trips searches by line name across the whole network.
+     */
+    async function searchMapLine(query) {
+        dom.mapLineResults.innerHTML = '<div class="search-result-item">Suche&hellip;</div>';
+        dom.mapLineResults.classList.remove('hidden');
+
+        try {
+            const data = await BvgApi.searchTripsByLine(query, { results: 30 });
+            const trips = Array.isArray(data.trips) ? data.trips : [];
+
+            // One entry per direction, not per running vehicle: the point is
+            // the line's route, and every run of a direction draws the same one.
+            const seen = new Set();
+            const directions = [];
+            for (const trip of trips) {
+                const line = trip.line || {};
+                const direction = trip.direction || (trip.destination && trip.destination.name) || '';
+                const key = `${line.name}|${direction}`;
+                if (!line.name || seen.has(key)) continue;
+                seen.add(key);
+                directions.push({
+                    id: trip.id,
+                    name: line.name,
+                    product: line.product || '',
+                    direction
+                });
+            }
+
+            if (directions.length === 0) {
+                dom.mapLineResults.innerHTML = `<div class="search-result-item">Keine Linie „${escapeHtml(query)}" gefunden (fährt sie gerade?)</div>`;
+                return;
+            }
+
+            dom.mapLineResults.innerHTML = directions.map(entry => `
+                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
+                     data-label="${escapeHtml(`${entry.name} → ${entry.direction}`)}">
+                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
+                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
+                </div>
+            `).join('');
+        } catch (e) {
+            console.error('Line search failed:', e);
+            dom.mapLineResults.innerHTML = `<div class="search-result-item">Fehler: ${escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    /** Shared with the board badges so a line keeps its colour everywhere. */
+    function lineColorClass(name) {
+        if (!name) return '';
+        const clean = String(name).toLowerCase().replace(/\s/g, '');
+        return /^[us]\d+$/.test(clean) ? clean : '';
     }
 
     function startRadarTimer() {

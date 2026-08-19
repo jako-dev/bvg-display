@@ -284,14 +284,24 @@
             <div id="map-view" class="map-view hidden">
                 <div class="map-toolbar">
                     <span class="map-title" id="map-title">Karte</span>
+                    <div class="search-wrapper map-line-search">
+                        <input type="text" id="map-line-input" placeholder="Linie anzeigen, z.B. M10"
+                               autocomplete="off" aria-label="Linie anzeigen">
+                        <div id="map-line-results" class="search-results hidden"></div>
+                    </div>
                     <label class="toggle-label map-live">
                         <input type="checkbox" id="map-live-toggle" checked>
                         <span>Live-Fahrzeuge</span>
                     </label>
-                    <select id="map-line-select" class="map-line-select"
-                            aria-label="Linie verfolgen">
-                        <option value="">Linie verfolgen&hellip;</option>
-                    </select>
+                    <div class="map-filters" id="map-filters" role="group" aria-label="Verkehrsmittel auf der Karte">
+                        <button class="map-filter badge badge-suburban" data-product="suburban" title="S-Bahn" aria-pressed="true">S</button>
+                        <button class="map-filter badge badge-subway" data-product="subway" title="U-Bahn" aria-pressed="true">U</button>
+                        <button class="map-filter badge badge-tram" data-product="tram" title="Tram" aria-pressed="true">T</button>
+                        <button class="map-filter badge badge-bus" data-product="bus" title="Bus" aria-pressed="true">B</button>
+                        <button class="map-filter badge badge-ferry" data-product="ferry" title="F&auml;hre" aria-pressed="true">F</button>
+                        <button class="map-filter badge badge-express" data-product="express" title="IC/ICE" aria-pressed="true">IC</button>
+                        <button class="map-filter badge badge-regional" data-product="regional" title="Regional" aria-pressed="true">RE</button>
+                    </div>
                     <button id="map-fit" class="btn-ghost">Ansicht anpassen</button>
                     <button id="map-clear" class="btn-ghost">Route l&ouml;schen</button>
                     <span class="map-status" id="map-status"></span>

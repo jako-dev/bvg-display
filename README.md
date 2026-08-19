@@ -29,8 +29,8 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
-- **Journey planner** — from your "home" station *or a street address* to anywhere in the network: which line to board, where to change, walking legs, platforms and live delays. With an address, the walk to the departure stop is planned as a real leg
-- **Map** — the route of any departure, the legs of any connection, and live vehicle positions polled from the network's radar feed. Pick any line running nearby and follow it, whether or not you have its stop saved. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Journey planner** — from your "home" station *or a street address* to anywhere in the network, including places that aren't stops: "Markthalle 9" works as a destination, and the walks at both ends are planned as real legs
+- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Falls back to a self-contained schematic when map tiles aren't reachable
 - **View switch in the header** — board, split, journey, map and LED, one click apart
 - **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
 - **Themes**: Dunkel, Modern
@@ -153,12 +153,20 @@ or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true
 > URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
 > has to be written `S%2BU%20Alexanderplatz`.
 
+### Showing a line
+
+Type a line name into the map toolbar — `M10`, `U5`, `S41`. The lookup goes
+through `/trips?lineName=…`, which searches the **whole network**, so it finds a
+line whether or not it happens to run past the area you're looking at. Pick a
+direction and its full route and stops are drawn.
+
 ### Starting journeys from your front door
 
 Set **Zuhause (Adresse)** in the settings panel and type your address — it is
 resolved through the same API (`/locations?addresses=true`) and stored in that
 browser's localStorage. The planner then offers it as an origin and every
-connection begins with the walk to the departure stop.
+connection begins with the walk to the departure stop, and a home marker shows
+on the map so you can see where you are relative to whatever is drawn.
 
 For a kiosk or an embedded view, pass it in the URL instead:
 
@@ -398,19 +406,21 @@ Endpoints used:
 | `/stops/:id` | Resolving names and coordinates for stations given by ID |
 | `/stops/:id/departures` | The departure board |
 | `/journeys` | Journey planner (with `polylines=true` for the map) |
+| `/trips` | Finding a line by name (`lineName=M10&onlyCurrentlyRunning=true`) |
 | `/trips/:id` | A single trip's route shape (`polyline=true`) |
 | `/radar` | Live vehicle positions in the visible area |
 
-The map polls `/radar` every 15s — one request per tick regardless of how many
+The map polls `/radar` every 10s — one request per tick regardless of how many
 vehicles are in view, which is what keeps the live map inside the rate limit.
-Trip routes are fetched on demand (when you click a departure or pick a line),
-not for every row on the board.
+Panning does not trigger a poll; the bounding box just follows the map and the
+next scheduled tick picks up wherever you moved to. Trip routes are fetched on
+demand (when you click a departure or look up a line), not for every row on the
+board.
 
-Between those polls the vehicles keep moving: `/radar` returns interpolation
-frames describing where each one travels over the following seconds, and the
-map redraws along them five times a second. The movement you see is smooth
-without the request rate changing at all. Panning the map re-polls, since the
-radar query is bounded by the visible area.
+**Live vehicles follow what you are looking at.** With a line or a connection on
+screen, only that line's vehicles are drawn — the whole city's traffic at once is
+noise. With nothing shown, everything passes, subject to the product filter in
+the map toolbar.
 
 ### Map tiles
 
