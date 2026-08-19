@@ -14,7 +14,11 @@
     const SEARCH_DEBOUNCE_MS = 300;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
     const RADAR_INTERVAL_MS = 10000; // Live vehicle poll — one request per tick
-    const RADAR_MAX_VEHICLES = 80;
+    // The API's own maximum. Anything lower and a busy viewport comes back as
+    // an arbitrary subset that differs on every poll — which looked like
+    // vehicles randomly appearing and vanishing, and like a journey's later
+    // legs having no vehicles at all.
+    const RADAR_MAX_VEHICLES = 256;
 
     // ===== State =====
     const state = {
@@ -74,6 +78,7 @@
     // connection. Live vehicles are narrowed to these: seeing every tram in
     // Berlin is noise, seeing the ones on the route you're looking at is not.
     let mapFocus = null;
+    let radarTruncated = false;
     // Set by whatever triggered the map (a journey, a departure row) and
     // consumed once the map view is actually up.
     let pendingMapScene = null;
@@ -1487,11 +1492,14 @@
     async function searchDestination(query) {
         try {
             const results = await BvgApi.searchPlaces(query, {
-                stops: true, addresses: true, poi: true, results: 10
+                stops: true, addresses: true, poi: true, results: 15
             });
 
             if (results.length === 0) {
-                dom.journeyToResults.innerHTML = '<div class="search-result-item">Keine Ergebnisse</div>';
+                // The POI index is the transport operator's, and it is thin
+                // outside well-known landmarks. A street address always works.
+                dom.journeyToResults.innerHTML =
+                    '<div class="search-result-item">Nichts gefunden — versuch die Straße und Hausnummer</div>';
             } else {
                 dom.journeyToResults.innerHTML = results.map(place => `
                     <div class="search-result-item"
@@ -1748,13 +1756,19 @@
         try {
             const data = await BvgApi.getRadar(bounds, {
                 results: RADAR_MAX_VEHICLES,
-                duration: 30,
-                frames: 3,
+                // Positions are drawn once per poll, so the movement frames the
+                // API can compute are payload we'd never read.
+                duration: 10,
+                frames: 1,
                 polylines: false
             });
             if (state.viewMode !== 'map') return;
 
             const movements = Array.isArray(data.movements) ? data.movements : [];
+            // At the cap the response is a slice of what's out there, not all
+            // of it — worth saying, because the missing vehicles are otherwise
+            // indistinguishable from ones that aren't running.
+            radarTruncated = movements.length >= RADAR_MAX_VEHICLES;
             liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
             applyMapFilters();
             updateLastRefreshTime();
@@ -1817,6 +1831,7 @@
         if (state.mapLive) {
             if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
             else if (count > 0) live = `Live: ${count} Fahrzeuge`;
+            if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
         }
         setMapStatus([mapFallbackNote, live].filter(Boolean).join(' · '));
     }
