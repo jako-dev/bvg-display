@@ -38,11 +38,21 @@ const TransitMap = (() => {
         walking: '#7c8896'
     };
 
+    const VEHICLE_TICK_MS = 200;   // how often interpolated positions are redrawn
+    const DEFAULT_FRAME_MS = 10000; // assumed span of the last frame
+
     let mode = null;          // 'leaflet' | 'svg' | null
     let container = null;
     let map = null;           // Leaflet map instance
-    let layerGroup = null;    // everything we draw lives here, so clearing is one call
+    let staticLayer = null;   // routes + stops — rebuilt only when they change
+    let vehicleLayer = null;  // vehicles — markers are moved, not recreated
     let svgEl = null;
+    let svgStatic = null;
+    let svgVehicles = null;
+    let projection = null;    // reused between vehicle ticks so the view can't jitter
+    let vehicleMarkers = new Map(); // key -> Leaflet marker / SVG <g>
+    let vehicleTimer = null;
+    let vehiclesAt = 0;       // when the current radar payload was received
     let tileConfig = { url: DEFAULT_TILE_URL, attribution: DEFAULT_ATTRIBUTION };
     let leafletPromise = null;
     let onFallback = null;    // notified when we drop from tiles to schematic
@@ -146,7 +156,8 @@ const TransitMap = (() => {
             const probe = probeTiles(tiles);
             tiles.addTo(map);
 
-            layerGroup = L.layerGroup().addTo(map);
+            staticLayer = L.layerGroup().addTo(map);
+            vehicleLayer = L.layerGroup().addTo(map);
             mode = 'leaflet';
 
             // Leaflet measures the container on creation; in a view that was
@@ -174,14 +185,17 @@ const TransitMap = (() => {
             // position Leaflet never computed, and removing the map with those
             // still attached throws on `_leaflet_pos`.
             try {
-                if (layerGroup) layerGroup.clearLayers();
+                if (staticLayer) staticLayer.clearLayers();
+                if (vehicleLayer) vehicleLayer.clearLayers();
                 map.remove();
             } catch (e) {
                 console.warn('Leaflet teardown failed, continuing to schematic:', e.message);
             }
             map = null;
-            layerGroup = null;
+            staticLayer = null;
+            vehicleLayer = null;
         }
+        vehicleMarkers.clear();
         mode = 'svg';
         buildSvg();
         renderScene();
@@ -218,14 +232,96 @@ const TransitMap = (() => {
     }
 
     /**
-     * @param {Array<{lat: number, lng: number, label: string, product?: string, direction?: string}>} vehicles
+     * Hand over the latest radar payload.
+     *
+     * Each vehicle may carry `frames` — the segments the API says it will move
+     * through over the next few seconds. Those let the positions be redrawn
+     * several times a second off a single request, which is where the smooth
+     * movement comes from: the poll interval is unchanged, only the drawing
+     * rate goes up.
+     *
+     * @param {Array<{key?: string, lat: number, lng: number, label: string,
+     *                product?: string, direction?: string,
+     *                frames?: Array<{from: [number, number], to: [number, number], t: number}>}>} vehicles
      */
     function setVehicles(vehicles) {
-        scene.vehicles = Array.isArray(vehicles) ? vehicles.filter(v => v && isFinite(v.lat) && isFinite(v.lng)) : [];
-        renderVehiclesOnly();
+        scene.vehicles = Array.isArray(vehicles)
+            ? vehicles.filter(v => v && isFinite(v.lat) && isFinite(v.lng))
+            : [];
+        vehiclesAt = Date.now();
+        syncVehicles();
+        if (scene.vehicles.length > 0) startVehicleAnimation();
+        else stopVehicleAnimation();
     }
 
+    /**
+     * Where a vehicle is `elapsed` ms after the payload arrived. Walks the
+     * frames to find the segment covering that moment and interpolates inside
+     * it; without usable frames the reported position simply stands still.
+     * @returns {[number, number]}
+     */
+    function interpolate(vehicle, elapsed) {
+        const frames = vehicle.frames;
+        if (!Array.isArray(frames) || frames.length === 0) return [vehicle.lat, vehicle.lng];
+
+        for (let i = 0; i < frames.length; i++) {
+            const frame = frames[i];
+            const start = frame.t;
+            // The API gives each frame a start time but no end; the next
+            // frame's start is the end, and the last one runs for one span.
+            const end = (i + 1 < frames.length)
+                ? frames[i + 1].t
+                : start + (frames.length > 1 ? frames[1].t - frames[0].t : DEFAULT_FRAME_MS);
+
+            if (elapsed < start) return frame.from;
+            if (elapsed < end) {
+                const progress = (elapsed - start) / Math.max(end - start, 1);
+                return [
+                    frame.from[0] + (frame.to[0] - frame.from[0]) * progress,
+                    frame.from[1] + (frame.to[1] - frame.from[1]) * progress
+                ];
+            }
+        }
+        // Past the last frame: hold at its end rather than snapping back.
+        return frames[frames.length - 1].to;
+    }
+
+    function startVehicleAnimation() {
+        if (vehicleTimer) return;
+        vehicleTimer = setInterval(tickVehicles, VEHICLE_TICK_MS);
+    }
+
+    function stopVehicleAnimation() {
+        if (vehicleTimer) {
+            clearInterval(vehicleTimer);
+            vehicleTimer = null;
+        }
+    }
+
+    /** Move the existing markers. Cheap enough to run several times a second. */
+    function tickVehicles() {
+        if (scene.vehicles.length === 0) return stopVehicleAnimation();
+        const elapsed = Date.now() - vehiclesAt;
+
+        for (const vehicle of scene.vehicles) {
+            const marker = vehicleMarkers.get(vehicleKey(vehicle));
+            if (!marker) continue;
+            const [lat, lng] = interpolate(vehicle, elapsed);
+            if (mode === 'leaflet') {
+                marker.setLatLng([lat, lng]);
+            } else if (projection) {
+                const [x, y] = projection([lat, lng]);
+                marker.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)})`);
+            }
+        }
+    }
+
+    // Trip id where the API gives one; otherwise line+direction, which is
+    // stable enough that a marker isn't torn down and rebuilt every poll.
+    const vehicleKey = (v) => v.key || v.tripId || `${v.label}|${v.direction || ''}`;
+
     function clear() {
+        stopVehicleAnimation();
         scene = { routes: [], stops: [], vehicles: [], focus: null };
         renderScene();
     }
@@ -253,21 +349,19 @@ const TransitMap = (() => {
 
     // ===== Rendering =====
 
+    // Routes and stops change rarely; vehicles change several times a second.
+    // Keeping them on separate layers means a vehicle tick never rebuilds a
+    // route, and a new route never resets the animation.
     function renderScene() {
-        if (mode === 'leaflet') renderLeaflet();
+        if (mode === 'leaflet') renderLeafletStatic();
         else if (mode === 'svg') renderSvg();
+        syncVehicles();
     }
 
-    // Vehicles move on every radar poll while routes stay put, so redrawing
-    // just them avoids tearing down the whole scene several times a minute.
-    function renderVehiclesOnly() {
-        renderScene();
-    }
-
-    function renderLeaflet() {
-        if (!map || !layerGroup || !window.L) return;
+    function renderLeafletStatic() {
+        if (!map || !staticLayer || !window.L) return;
         const L = window.L;
-        layerGroup.clearLayers();
+        staticLayer.clearLayers();
 
         for (const route of scene.routes) {
             L.polyline(route.points, {
@@ -277,7 +371,7 @@ const TransitMap = (() => {
                 dashArray: route.dashed ? '6 8' : null,
                 lineJoin: 'round',
                 lineCap: 'round'
-            }).addTo(layerGroup);
+            }).addTo(staticLayer);
         }
 
         for (const stop of scene.stops) {
@@ -288,20 +382,76 @@ const TransitMap = (() => {
                 weight: major ? 3 : 2,
                 fillColor: major ? '#1b1f24' : '#5b6672',
                 fillOpacity: 1
-            }).addTo(layerGroup).bindTooltip(stop.name, { direction: 'top' });
+            }).addTo(staticLayer).bindTooltip(stop.name, { direction: 'top' });
+        }
+    }
+
+    /**
+     * Reconcile the marker set against the current vehicles: create the new
+     * ones, drop the departed, leave the rest in place for tickVehicles to
+     * move. Recreating them every poll would restart their motion and throw
+     * away any open tooltip.
+     */
+    function syncVehicles() {
+        if (mode === 'leaflet' && (!map || !vehicleLayer || !window.L)) return;
+        if (mode === 'svg' && !svgVehicles) return;
+        if (!mode) return;
+
+        const seen = new Set();
+        for (const vehicle of scene.vehicles) {
+            const key = vehicleKey(vehicle);
+            seen.add(key);
+            if (!vehicleMarkers.has(key)) {
+                vehicleMarkers.set(key, mode === 'leaflet'
+                    ? createLeafletVehicle(vehicle)
+                    : createSvgVehicle(vehicle));
+            }
         }
 
-        for (const vehicle of scene.vehicles) {
-            const color = productColor(vehicle.product);
-            const icon = L.divIcon({
-                className: 'map-vehicle-icon',
-                html: `<span class="map-vehicle" style="--vehicle-color:${color}">${escapeHtml(vehicle.label)}</span>`,
-                iconSize: null
-            });
-            L.marker([vehicle.lat, vehicle.lng], { icon, keyboard: false })
-                .addTo(layerGroup)
-                .bindTooltip(`${vehicle.label} → ${vehicle.direction || '?'}`, { direction: 'top' });
+        for (const [key, marker] of vehicleMarkers) {
+            if (seen.has(key)) continue;
+            if (mode === 'leaflet') vehicleLayer.removeLayer(marker);
+            else marker.remove();
+            vehicleMarkers.delete(key);
         }
+
+        tickVehicles();
+    }
+
+    function createLeafletVehicle(vehicle) {
+        const L = window.L;
+        const icon = L.divIcon({
+            className: 'map-vehicle-icon',
+            html: `<span class="map-vehicle" style="--vehicle-color:${productColor(vehicle.product)}">${escapeHtml(vehicle.label)}</span>`,
+            iconSize: null
+        });
+        return L.marker([vehicle.lat, vehicle.lng], { icon, keyboard: false })
+            .addTo(vehicleLayer)
+            .bindTooltip(`${vehicle.label} → ${vehicle.direction || '?'}`, { direction: 'top' });
+    }
+
+    function createSvgVehicle(vehicle) {
+        const ns = 'http://www.w3.org/2000/svg';
+        const group = document.createElementNS(ns, 'g');
+
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('r', '9');
+        dot.setAttribute('fill', productColor(vehicle.product));
+        dot.setAttribute('stroke', 'var(--map-stop-ring, #ffffff)');
+        dot.setAttribute('stroke-width', '2');
+
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('y', '3.5');
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('class', 'map-schematic-vehicle');
+        label.textContent = vehicle.label;
+
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = `${vehicle.label} → ${vehicle.direction || '?'}`;
+
+        group.append(title, dot, label);
+        svgVehicles.appendChild(group);
+        return group;
     }
 
     /**
@@ -312,8 +462,20 @@ const TransitMap = (() => {
     function renderSvg() {
         if (!svgEl) return;
 
-        const points = collectPoints();
+        // Vehicles are deliberately excluded from the framing: including them
+        // would re-fit the view every time one moved, and the whole schematic
+        // would crawl around. Only fall back to them when nothing else exists.
+        const anchors = [];
+        for (const route of scene.routes) anchors.push(...route.points);
+        for (const stop of scene.stops) anchors.push([stop.lat, stop.lng]);
+        const points = anchors.length > 0 ? anchors : collectPoints();
+
         svgEl.innerHTML = '';
+        vehicleMarkers.clear();
+        svgStatic = null;
+        svgVehicles = null;
+        projection = null;
+
         if (points.length === 0) {
             svgEl.setAttribute('viewBox', '0 0 100 60');
             return;
@@ -342,13 +504,20 @@ const TransitMap = (() => {
             // SVG y grows downward, latitude grows northward — hence the flip.
             offsetY + (maxLat - lat) * scale
         ];
+        // Held for the vehicle ticks, which must place markers in the same
+        // coordinate space without recomputing (and possibly shifting) it.
+        projection = project;
 
         const svgNs = 'http://www.w3.org/2000/svg';
+        svgStatic = document.createElementNS(svgNs, 'g');
+        svgVehicles = document.createElementNS(svgNs, 'g');
+        svgEl.append(svgStatic, svgVehicles);
+
         const add = (tag, attrs, text) => {
             const node = document.createElementNS(svgNs, tag);
             for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
             if (text !== undefined) node.textContent = text;
-            svgEl.appendChild(node);
+            svgStatic.appendChild(node);
             return node;
         };
 
@@ -381,18 +550,22 @@ const TransitMap = (() => {
             }
         }
 
-        for (const vehicle of scene.vehicles) {
-            const [x, y] = project([vehicle.lat, vehicle.lng]);
-            add('circle', {
-                cx: x.toFixed(1), cy: y.toFixed(1), r: 9,
-                fill: productColor(vehicle.product),
-                stroke: 'var(--map-stop-ring, #ffffff)', 'stroke-width': 2
-            });
-            add('text', {
-                x: x.toFixed(1), y: (y + 3.5).toFixed(1),
-                class: 'map-schematic-vehicle', 'text-anchor': 'middle'
-            }, vehicle.label);
-        }
+    }
+
+    /**
+     * Run `fn` after the user finishes panning or zooming. Debounced, because
+     * Leaflet fires moveend on every inertia step and each call costs a request.
+     * No-op on the schematic, which has no viewport to move.
+     */
+    function onViewChange(fn, delay = 700) {
+        if (mode !== 'leaflet' || !map) return;
+        let timer = null;
+        const schedule = () => {
+            clearTimeout(timer);
+            timer = setTimeout(fn, delay);
+        };
+        map.on('moveend', schedule);
+        map.on('zoomend', schedule);
     }
 
     /**
@@ -420,12 +593,18 @@ const TransitMap = (() => {
     }
 
     function destroy() {
+        stopVehicleAnimation();
         if (map) {
             map.remove();
             map = null;
-            layerGroup = null;
+            staticLayer = null;
+            vehicleLayer = null;
         }
+        vehicleMarkers.clear();
         svgEl = null;
+        svgStatic = null;
+        svgVehicles = null;
+        projection = null;
         mode = null;
         scene = { routes: [], stops: [], vehicles: [], focus: null };
         if (container) container.innerHTML = '';
@@ -440,6 +619,9 @@ const TransitMap = (() => {
     return {
         init,
         getBounds,
+        onViewChange,
+        pauseVehicles: stopVehicleAnimation,
+        resumeVehicles: startVehicleAnimation,
         setRoutes,
         setStops,
         setVehicles,

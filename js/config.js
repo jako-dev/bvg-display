@@ -172,6 +172,30 @@ const AppConfig = (() => {
         const mapLive = toBool(raw.mapLive);
         if (mapLive !== undefined) settings.mapLive = mapLive;
 
+        // Home address origin. Accepts "lat,lng" or "lat,lng|Label" so a kiosk
+        // URL can start journeys from a doorstep without any local setup.
+        if (typeof raw.homeAddress === 'string' && raw.homeAddress.trim()) {
+            const [coords, label] = raw.homeAddress.split('|');
+            const [lat, lng] = coords.split(',').map(n => parseFloat(n));
+            if (Number.isFinite(lat) && Number.isFinite(lng)) {
+                settings.homeAddress = {
+                    latitude: lat,
+                    longitude: lng,
+                    address: (label || '').trim() || `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+                };
+            }
+        } else if (raw.homeAddress && typeof raw.homeAddress === 'object') {
+            const lat = Number(raw.homeAddress.latitude);
+            const lng = Number(raw.homeAddress.longitude);
+            if (Number.isFinite(lat) && Number.isFinite(lng)) {
+                settings.homeAddress = {
+                    latitude: lat,
+                    longitude: lng,
+                    address: String(raw.homeAddress.address || '').trim() || `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+                };
+            }
+        }
+
         // Tile server override — deployment-level only. Not accepted from the
         // URL, where it would let any link repoint the map at an arbitrary host.
         if (typeof raw.mapTileUrl === 'string' && /^https?:\/\//.test(raw.mapTileUrl)) {
@@ -237,6 +261,7 @@ const AppConfig = (() => {
             splitLeftId: first('left'),
             splitRightId: first('right'),
             homeStationId: first('home'),
+            homeAddress: first('address'),
             destination: first('to', 'destination'),
             mapLive: first('live')
         };

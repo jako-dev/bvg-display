@@ -36,6 +36,17 @@
                     <div id="saved-stations" class="saved-stations"></div>
                 </div>
 
+                <!-- Home address -->
+                <div class="setting-group">
+                    <label for="home-address">Zuhause (Adresse)</label>
+                    <div class="search-wrapper">
+                        <input type="text" id="home-address" placeholder="z.B. Mühsamstr. 39, 10249 Berlin" autocomplete="off">
+                        <div id="home-address-results" class="search-results hidden"></div>
+                    </div>
+                    <div id="home-address-current" class="home-address-current"></div>
+                    <p class="setting-hint">Wird als Startpunkt in der Verbindungssuche angeboten &mdash; der Fußweg zur Haltestelle wird dann mitberechnet.</p>
+                </div>
+
                 <!-- Transport Filters -->
                 <div class="setting-group">
                     <label>Verkehrsmittel</label>
@@ -168,6 +179,31 @@
                     <h1 class="station-name" id="current-station-name">BVG Abfahrtsmonitor</h1>
                     <span class="realtime-indicator" id="realtime-indicator" title="Echtzeitdaten">&#9679;</span>
                 </div>
+                <!-- Ansicht: the same modes as the settings panel, one click away.
+                     data-view drives both; the settings buttons stay in sync. -->
+                <div class="view-switch" id="view-switch" role="group" aria-label="Ansicht">
+                    <button class="view-btn active" data-view="single" title="Einzelstation">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+                        <span>Station</span>
+                    </button>
+                    <button class="view-btn" data-view="split" title="Split-View">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h4v11h-4zM9.5 2.5h4v11h-4z"/></svg>
+                        <span>Split</span>
+                    </button>
+                    <button class="view-btn" data-view="journey" title="Verbindung suchen">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="12" r="1.8"/><circle cx="12" cy="4" r="1.8"/><path d="M4 10V7a3 3 0 0 1 3-3h5"/></svg>
+                        <span>Verbindung</span>
+                    </button>
+                    <button class="view-btn" data-view="map" title="Karte">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 14.5s4.5-4.2 4.5-7.5a4.5 4.5 0 1 0-9 0c0 3.3 4.5 7.5 4.5 7.5z"/><circle cx="8" cy="7" r="1.7"/></svg>
+                        <span>Karte</span>
+                    </button>
+                    <button class="view-btn" data-view="led" title="LED-Panel">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4.5" width="13" height="7" rx="1"/><path d="M4 7v2M7 7v2M10 7v2"/></svg>
+                        <span>LED</span>
+                    </button>
+                </div>
+
                 <div class="header-right">
                     <span id="clock" class="clock"></span>
                     <button id="kiosk-btn" class="btn-icon" aria-label="Kiosk mode" title="Kiosk-Modus">&#9974;</button>
@@ -252,6 +288,10 @@
                         <input type="checkbox" id="map-live-toggle" checked>
                         <span>Live-Fahrzeuge</span>
                     </label>
+                    <select id="map-line-select" class="map-line-select"
+                            aria-label="Linie verfolgen">
+                        <option value="">Linie verfolgen&hellip;</option>
+                    </select>
                     <button id="map-fit" class="btn-ghost">Ansicht anpassen</button>
                     <button id="map-clear" class="btn-ghost">Route l&ouml;schen</button>
                     <span class="map-status" id="map-status"></span>

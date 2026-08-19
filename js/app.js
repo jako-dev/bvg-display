@@ -31,6 +31,7 @@
         splitLeftId: null,      // Station shown in the left split pane
         splitRightId: null,     // Station shown in the right split pane
         homeStationId: null,    // Journey origin — the "Home" the planner starts from
+        homeAddress: null,      // Optional street address origin {address, latitude, longitude}
         destination: null,      // Journey target {id, name}
         mapLive: true,          // Poll /radar for live vehicles in the map view
         mapTileUrl: null,       // Override the tile server (config.json only)
@@ -72,6 +73,9 @@
     // ID and name, but a station's coordinates are what the radar bounding box
     // is built from, so the full objects are kept until the pick is made.
     let lastSearchResults = new Map();
+    // Latest radar payload, kept so the line picker and the map agree on what
+    // is currently running.
+    let liveVehicles = [];
 
     // ===== DOM References =====
     const dom = {
@@ -82,6 +86,9 @@
         stationSearch: document.getElementById('station-search'),
         searchResults: document.getElementById('search-results'),
         savedStations: document.getElementById('saved-stations'),
+        homeAddressInput: document.getElementById('home-address'),
+        homeAddressResults: document.getElementById('home-address-results'),
+        homeAddressCurrent: document.getElementById('home-address-current'),
         stationTabs: document.getElementById('station-tabs'),
         departuresList: document.getElementById('departures-list'),
         loadingIndicator: document.getElementById('loading-indicator'),
@@ -129,9 +136,11 @@
         mapContainer: document.getElementById('map-container'),
         mapTitle: document.getElementById('map-title'),
         mapLiveToggle: document.getElementById('map-live-toggle'),
+        mapLineSelect: document.getElementById('map-line-select'),
         mapFit: document.getElementById('map-fit'),
         mapClear: document.getElementById('map-clear'),
         mapStatus: document.getElementById('map-status'),
+        viewSwitch: document.getElementById('view-switch'),
         // Kiosk
         kioskBtn: document.getElementById('kiosk-btn'),
         kioskToggle: document.getElementById('kiosk-toggle')
@@ -164,6 +173,7 @@
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        renderHomeAddress();
         renderJourneyControls();
         updateDataSourceLabel();
 
@@ -235,8 +245,15 @@
         if (!has(state.splitRightId)) state.splitRightId = null;
         // No explicit home yet (or it was removed) — the first station is the
         // most useful guess, and the planner is unusable without an origin.
-        if (!has(state.homeStationId)) {
-            state.homeStationId = state.stations.length > 0 ? state.stations[0].id : null;
+        if (state.homeStationId === HOME_ADDRESS_VALUE && !state.homeAddress) {
+            state.homeStationId = null; // address was removed under it
+        }
+        if (state.homeStationId !== HOME_ADDRESS_VALUE && !has(state.homeStationId)) {
+            // A configured address is a deliberate choice of origin, so it wins
+            // over silently falling back to the first saved station.
+            state.homeStationId = state.homeAddress
+                ? HOME_ADDRESS_VALUE
+                : (state.stations.length > 0 ? state.stations[0].id : null);
         }
     }
 
@@ -265,6 +282,9 @@
             state.apiProvider = parsed.apiProvider || state.apiProvider;
             if (parsed.mapLive !== undefined) state.mapLive = parsed.mapLive !== false;
             if (parsed.destination && parsed.destination.id) state.destination = parsed.destination;
+            if (parsed.homeAddress && isFinite(parsed.homeAddress.latitude) && isFinite(parsed.homeAddress.longitude)) {
+                state.homeAddress = parsed.homeAddress;
+            }
             state.filters = { ...state.filters, ...parsed.filters };
             BvgApi.setProvider(state.apiProvider);
             // setProvider ignores unknown hosts — mirror back what it accepted.
@@ -290,6 +310,7 @@
                 splitLeftId: state.splitLeftId,
                 splitRightId: state.splitRightId,
                 homeStationId: state.homeStationId,
+                homeAddress: state.homeAddress,
                 destination: state.destination,
                 mapLive: state.mapLive,
                 apiProvider: state.apiProvider,
@@ -334,6 +355,7 @@
             if (!e.target.closest('.search-wrapper')) {
                 dom.searchResults.classList.add('hidden');
                 dom.journeyToResults.classList.add('hidden');
+                dom.homeAddressResults.classList.add('hidden');
             }
             if (dom.settingsPanel.classList.contains('open') &&
                 !dom.settingsPanel.contains(e.target) &&
@@ -427,11 +449,58 @@
         dom.viewMap.addEventListener('click', () => applyViewMode('map'));
         dom.viewLed.addEventListener('click', () => applyViewMode('led'));
 
+        // Header switch — same modes, delegated so the markup stays declarative.
+        dom.viewSwitch.addEventListener('click', (e) => {
+            const btn = e.target.closest('.view-btn[data-view]');
+            if (btn && btn.dataset.view !== state.viewMode) applyViewMode(btn.dataset.view);
+        });
+
         // Journey planner
         dom.journeyFrom.addEventListener('change', (e) => {
             state.homeStationId = e.target.value || null;
             saveState();
+            renderSavedStations();
             fetchJourneys();
+        });
+
+        // Home address search
+        let addressTimeout;
+        dom.homeAddressInput.addEventListener('input', (e) => {
+            clearTimeout(addressTimeout);
+            const query = e.target.value;
+            if (query.trim().length < 3) {
+                dom.homeAddressResults.classList.add('hidden');
+                return;
+            }
+            addressTimeout = setTimeout(() => searchHomeAddress(query), SEARCH_DEBOUNCE_MS);
+        });
+
+        dom.homeAddressResults.addEventListener('click', (e) => {
+            const item = e.target.closest('.search-result-item[data-address]');
+            if (!item) return;
+            state.homeAddress = {
+                address: item.dataset.address,
+                latitude: parseFloat(item.dataset.lat),
+                longitude: parseFloat(item.dataset.lng)
+            };
+            // Setting an address is an implicit "start from here".
+            state.homeStationId = HOME_ADDRESS_VALUE;
+            dom.homeAddressInput.value = '';
+            dom.homeAddressResults.classList.add('hidden');
+            saveState();
+            renderHomeAddress();
+            renderJourneyControls();
+            if (state.viewMode === 'journey' && state.destination) fetchJourneys();
+        });
+
+        dom.homeAddressCurrent.addEventListener('click', (e) => {
+            if (!e.target.closest('#home-address-clear')) return;
+            state.homeAddress = null;
+            if (state.homeStationId === HOME_ADDRESS_VALUE) state.homeStationId = null;
+            reconcileStationSelection();
+            saveState();
+            renderHomeAddress();
+            renderJourneyControls();
         });
 
         let destTimeout;
@@ -487,13 +556,31 @@
                 startRadarTimer();
             } else {
                 stopRadarTimer();
+                liveVehicles = [];
                 TransitMap.setVehicles([]);
+                renderLinePicker();
             }
         });
+        // Follow any line that's running right now — independent of the saved
+        // stations, so you can watch a tram you have no stop for.
+        dom.mapLineSelect.addEventListener('change', (e) => {
+            const tripId = e.target.value;
+            if (!tripId) {
+                shownRoute = null;
+                TransitMap.setRoutes([]);
+                TransitMap.setStops([]);
+                dom.mapTitle.textContent = 'Karte';
+                return;
+            }
+            const vehicle = liveVehicles.find(v => v.tripId === tripId);
+            showTripOnMap(tripId, vehicle ? `${vehicle.label} → ${vehicle.direction || '?'}` : '');
+        });
+
         dom.mapFit.addEventListener('click', () => TransitMap.fit());
         dom.mapClear.addEventListener('click', () => {
             shownRoute = null;
             selectedJourney = -1;
+            dom.mapLineSelect.value = '';
             TransitMap.setRoutes([]);
             TransitMap.setStops([]);
             dom.mapTitle.textContent = 'Karte';
@@ -615,6 +702,11 @@
         }
         dom.searchResults.classList.remove('hidden');
     }
+
+    const PRODUCT_LABELS = {
+        suburban: 'S-Bahn', subway: 'U-Bahn', tram: 'Tram',
+        bus: 'Bus', ferry: 'Fähre', express: 'IC/ICE', regional: 'Regional'
+    };
 
     const PRODUCT_BADGES = {
         suburban: ['badge-suburban', 'S'],
@@ -1086,6 +1178,14 @@
         dom.viewMap.classList.toggle('active', mode === 'map');
         dom.viewLed.classList.toggle('active', mode === 'led');
 
+        // The header switch mirrors the settings buttons; whichever was used,
+        // both have to end up showing the same mode.
+        for (const btn of dom.viewSwitch.querySelectorAll('.view-btn[data-view]')) {
+            const isActive = btn.dataset.view === mode;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        }
+
         // Hide all views first
         dom.singleView.classList.add('hidden');
         dom.splitView.classList.add('hidden');
@@ -1234,21 +1334,95 @@
 
     // ===== Journey Planner =====
 
+    // Sentinel for the address entry in the origin dropdown — a real station's
+    // value is always its ID, so this can't collide.
+    const HOME_ADDRESS_VALUE = '__address__';
+
     function getHomeStation() {
         return state.stations.find(s => s.id === state.homeStationId)
             || state.stations[0]
             || null;
     }
 
+    /**
+     * What the planner should depart from: the saved address when it is
+     * selected, otherwise a station.
+     * @returns {{place: Object|string, label: string, walkTime: number}|null}
+     */
+    function getJourneyOrigin() {
+        if (state.homeStationId === HOME_ADDRESS_VALUE && state.homeAddress) {
+            return {
+                place: state.homeAddress,
+                label: state.homeAddress.address,
+                // No manual offset: starting from a coordinate makes HAFAS
+                // plan the real walk to the platform as its own leg.
+                walkTime: 0
+            };
+        }
+        const station = getHomeStation();
+        if (!station) return null;
+        return { place: station.id, label: station.name, walkTime: station.walkTime || 0 };
+    }
+
     function renderJourneyControls() {
+        const options = [];
+        if (state.homeAddress) {
+            options.push(`<option value="${HOME_ADDRESS_VALUE}">🏠 Zuhause · ${escapeHtml(state.homeAddress.address)}</option>`);
+        }
+        for (const station of state.stations) {
+            options.push(`<option value="${escapeHtml(station.id)}">${escapeHtml(station.name)}</option>`);
+        }
+
+        dom.journeyFrom.innerHTML = options.length
+            ? options.join('')
+            : '<option value="">Keine Station gespeichert</option>';
+        dom.journeyFrom.disabled = options.length === 0;
+
+        // Restore the selection: the stored id, or the address, or the fallback
+        // station getHomeStation() would pick anyway.
         const home = getHomeStation();
-        dom.journeyFrom.innerHTML = state.stations.map(station =>
-            `<option value="${escapeHtml(station.id)}"${home && station.id === home.id ? ' selected' : ''}>${escapeHtml(station.name)}</option>`
-        ).join('') || '<option value="">Keine Station gespeichert</option>';
-        dom.journeyFrom.disabled = state.stations.length === 0;
+        const wanted = (state.homeStationId === HOME_ADDRESS_VALUE && state.homeAddress)
+            ? HOME_ADDRESS_VALUE
+            : (home ? home.id : '');
+        if (wanted) dom.journeyFrom.value = wanted;
 
         if (state.destination && dom.journeyTo.value !== state.destination.name) {
             dom.journeyTo.value = state.destination.name || state.destination.id;
+        }
+    }
+
+    // ===== Home address =====
+
+    function renderHomeAddress() {
+        if (!state.homeAddress) {
+            dom.homeAddressCurrent.innerHTML = '';
+            return;
+        }
+        dom.homeAddressCurrent.innerHTML = `
+            <span class="home-address-label">🏠 ${escapeHtml(state.homeAddress.address)}</span>
+            <button class="btn-remove" id="home-address-clear"
+                    aria-label="Adresse entfernen" title="Entfernen">&times;</button>`;
+    }
+
+    async function searchHomeAddress(query) {
+        try {
+            const results = await BvgApi.searchAddresses(query);
+            if (results.length === 0) {
+                dom.homeAddressResults.innerHTML = '<div class="search-result-item">Keine Adresse gefunden</div>';
+            } else {
+                dom.homeAddressResults.innerHTML = results.map(hit => `
+                    <div class="search-result-item"
+                         data-address="${escapeHtml(hit.address)}"
+                         data-lat="${hit.latitude}" data-lng="${hit.longitude}">
+                        <div>${escapeHtml(hit.address)}</div>
+                    </div>
+                `).join('');
+            }
+            dom.homeAddressResults.classList.remove('hidden');
+        } catch (e) {
+            console.error('Address search failed:', e);
+            dom.homeAddressResults.innerHTML = '<div class="search-result-item">Fehler bei der Suche</div>';
+            dom.homeAddressResults.classList.remove('hidden');
         }
     }
 
@@ -1278,16 +1452,16 @@
     }
 
     async function fetchJourneys() {
-        const home = getHomeStation();
-        if (!home) {
-            showJourneyMessage('<p>Bitte zuerst eine Station in den Einstellungen speichern.</p>');
+        const origin = getJourneyOrigin();
+        if (!origin) {
+            showJourneyMessage('<p>Bitte zuerst eine Station oder eine Adresse in den Einstellungen speichern.</p>');
             return;
         }
         if (!state.destination || !state.destination.id) {
             showJourneyMessage('<p>Bitte ein Ziel ausw&auml;hlen.</p>');
             return;
         }
-        if (state.destination.id === home.id) {
+        if (state.destination.id === origin.place) {
             showJourneyMessage('<p>Start und Ziel sind dieselbe Station.</p>');
             return;
         }
@@ -1296,13 +1470,14 @@
         showJourneyMessage('<p>Suche Verbindungen&hellip;</p>');
 
         try {
-            // Walk time from the origin is dead time before boarding, so the
-            // search starts when you would actually arrive at the platform.
-            const departure = home.walkTime > 0
-                ? new Date(Date.now() + home.walkTime * 60000)
+            // A station origin has a walk time the API knows nothing about, so
+            // the search starts from when you'd actually reach the platform.
+            // An address origin needs no such offset — the walk is a real leg.
+            const departure = origin.walkTime > 0
+                ? new Date(Date.now() + origin.walkTime * 60000)
                 : null;
 
-            const data = await BvgApi.getJourneys(home.id, state.destination.id, state.filters, {
+            const data = await BvgApi.getJourneys(origin.place, state.destination.id, state.filters, {
                 results: 5,
                 polylines: true,
                 departure
@@ -1329,8 +1504,8 @@
         selectedJourney = index;
         JourneyView.render(dom.journeyResults, journeys, { selectedIndex: selectedJourney });
 
-        const home = getHomeStation();
-        const label = `${home ? home.name : '?'} → ${state.destination ? state.destination.name : '?'}`;
+        const origin = getJourneyOrigin();
+        const label = `${origin ? origin.label : '?'} → ${state.destination ? state.destination.name : '?'}`;
         pendingMapScene = {
             title: label,
             routes: JourneyView.toRoutes(journey),
@@ -1376,6 +1551,11 @@
         }).then((backend) => {
             mapReady = true;
             if (backend === 'leaflet') setMapStatus('');
+            // Radar is bounded by what's on screen, so panning somewhere else
+            // should show what runs there rather than what ran where you were.
+            TransitMap.onViewChange(() => {
+                if (state.viewMode === 'map' && state.mapLive) fetchRadar();
+            });
             return backend;
         });
 
@@ -1479,18 +1659,89 @@
             if (state.viewMode !== 'map') return;
 
             const movements = Array.isArray(data.movements) ? data.movements : [];
-            TransitMap.setVehicles(movements.map(movement => ({
-                lat: movement.location && movement.location.latitude,
-                lng: movement.location && movement.location.longitude,
-                label: (movement.line && movement.line.name) || '?',
-                product: (movement.line && movement.line.product) || '',
-                direction: movement.direction || ''
-            })).filter(v => isFinite(v.lat) && isFinite(v.lng)));
+            liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
+            TransitMap.setVehicles(liveVehicles);
+            renderLinePicker();
             updateLastRefreshTime();
         } catch (e) {
             console.warn('Radar poll failed:', e.message);
             setMapStatus(`Live-Fahrzeuge nicht verfügbar: ${e.message}`, true);
         }
+    }
+
+    /** A frame endpoint is either a stop (with .location) or a bare location. */
+    function frameCoords(point) {
+        const loc = (point && point.location) || point;
+        if (!loc || !isFinite(loc.latitude) || !isFinite(loc.longitude)) return null;
+        return [loc.latitude, loc.longitude];
+    }
+
+    /**
+     * One radar movement in the shape the map wants, including its frames —
+     * the short segments the API says it will travel next, which is what lets
+     * the map animate between polls instead of jumping once per request.
+     */
+    function toVehicle(movement) {
+        const line = movement.line || {};
+        const frames = [];
+        for (const frame of movement.frames || []) {
+            const from = frameCoords(frame.origin);
+            const to = frameCoords(frame.destination);
+            if (from && to && typeof frame.t === 'number') frames.push({ from, to, t: frame.t });
+        }
+        frames.sort((a, b) => a.t - b.t);
+
+        return {
+            key: movement.tripId ? String(movement.tripId) : `${line.name || '?'}|${movement.direction || ''}`,
+            tripId: movement.tripId ? String(movement.tripId) : '',
+            lat: movement.location && movement.location.latitude,
+            lng: movement.location && movement.location.longitude,
+            label: line.name || '?',
+            product: line.product || '',
+            direction: movement.direction || '',
+            frames
+        };
+    }
+
+    /**
+     * Fill the "follow a line" dropdown from whatever is running right now.
+     * Rebuilt on every poll, so the open selection has to be preserved by hand.
+     */
+    function renderLinePicker() {
+        const previous = dom.mapLineSelect.value;
+        const seen = new Set();
+        const byProduct = new Map();
+
+        for (const vehicle of liveVehicles) {
+            if (!vehicle.tripId) continue; // without a trip there is no route to draw
+            const label = `${vehicle.label} → ${vehicle.direction || '?'}`;
+            if (seen.has(label)) continue;
+            seen.add(label);
+            const group = PRODUCT_LABELS[vehicle.product] || 'Sonstige';
+            if (!byProduct.has(group)) byProduct.set(group, []);
+            byProduct.get(group).push({ value: vehicle.tripId, label });
+        }
+
+        const groups = [...byProduct.entries()].sort((a, b) => a[0].localeCompare(b[0], 'de'));
+        const options = groups.map(([group, entries]) => {
+            const sorted = entries.sort((a, b) => a.label.localeCompare(b.label, 'de', { numeric: true }));
+            return `<optgroup label="${escapeHtml(group)}">${sorted.map(entry =>
+                `<option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>`
+            ).join('')}</optgroup>`;
+        }).join('');
+
+        const placeholder = liveVehicles.length === 0
+            ? 'Keine Fahrzeuge in Sicht'
+            : `Linie verfolgen… (${seen.size})`;
+        dom.mapLineSelect.innerHTML = `<option value="">${placeholder}</option>${options}`;
+
+        // Keep the tracked trip selected across refreshes; if it has finished
+        // its run and dropped out of the feed, fall back to the placeholder.
+        const wanted = (shownRoute && shownRoute.tripId) || previous;
+        if (wanted && dom.mapLineSelect.querySelector(`option[value="${CSS.escape(wanted)}"]`)) {
+            dom.mapLineSelect.value = wanted;
+        }
+        dom.mapLineSelect.disabled = seen.size === 0;
     }
 
     function startRadarTimer() {

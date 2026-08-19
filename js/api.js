@@ -118,6 +118,40 @@ const BvgApi = (() => {
     }
 
     /**
+     * Search for street addresses (and points of interest) rather than stops —
+     * used to pin down a home address so a journey can start at the front door
+     * and include the walk to the platform.
+     * @param {string} query - e.g. 'Mühsamstr. 39, 10249 Berlin'
+     * @returns {Promise<Array<{address: string, latitude: number, longitude: number}>>}
+     */
+    async function searchAddresses(query) {
+        if (!query || query.trim().length < 3) return [];
+        const params = new URLSearchParams({
+            query: query.trim(),
+            results: '6',
+            stops: 'false',
+            addresses: 'true',
+            poi: 'true',
+            pretty: 'false'
+        });
+        const data = await rateLimitedFetch(`${baseUrl}/locations?${params}`);
+        if (!Array.isArray(data)) return [];
+
+        // Addresses come back as bare locations (lat/lng at the top level),
+        // unlike stops which nest them under `location`.
+        return data
+            .filter(item => item && item.type === 'location'
+                && isFinite(item.latitude) && isFinite(item.longitude))
+            .map(item => ({
+                address: item.address || item.name || '',
+                latitude: item.latitude,
+                longitude: item.longitude,
+                poi: !!item.poi
+            }))
+            .filter(item => item.address);
+    }
+
+    /**
      * Get departures for a station
      * @param {string} stationId - Station ID
      * @param {Object} filters - Transport type filters
@@ -170,10 +204,24 @@ const BvgApi = (() => {
      * @param {Date|string} [opt.departure] - Depart at this time instead of now
      * @returns {Promise<Object>} { journeys: [...] }
      */
-    async function getJourneys(fromId, toId, filters = {}, opt = {}) {
+    /**
+     * Write an endpoint into the query. A saved station goes in as an ID; an
+     * address goes in as a coordinate pair, which is what makes HAFAS plan the
+     * walk from that point to the first platform instead of starting at a stop.
+     */
+    function setJourneyPlace(params, key, place) {
+        if (place && typeof place === 'object') {
+            params.set(`${key}.latitude`, String(place.latitude));
+            params.set(`${key}.longitude`, String(place.longitude));
+            if (place.address) params.set(`${key}.address`, place.address);
+            else if (place.name) params.set(`${key}.name`, place.name);
+            return;
+        }
+        params.set(key, String(place));
+    }
+
+    async function getJourneys(from, to, filters = {}, opt = {}) {
         const params = new URLSearchParams({
-            from: String(fromId),
-            to: String(toId),
             results: String(opt.results || 4),
             stopovers: 'false',
             remarks: 'true',
@@ -181,6 +229,9 @@ const BvgApi = (() => {
             pretty: 'false',
             language: 'de'
         });
+
+        setJourneyPlace(params, 'from', from);
+        setJourneyPlace(params, 'to', to);
 
         // -1 means "as many transfers as needed"; the API rejects it as a count,
         // so it is simply left out and HAFAS applies its own default.
@@ -292,6 +343,7 @@ const BvgApi = (() => {
         PRODUCTS,
         DEFAULT_PROVIDER,
         searchStations,
+        searchAddresses,
         getDepartures,
         getStation,
         getJourneys,

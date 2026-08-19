@@ -83,6 +83,15 @@ const JourneyView = (() => {
     const isCancelled = (journey) => (journey.legs || []).some(leg => leg.cancelled === true);
 
     /**
+     * Label for a leg endpoint. Stops carry `name`; a coordinate origin — what
+     * a journey from a home address starts at — carries `address` instead.
+     */
+    const placeName = (place) => {
+        if (!place) return '';
+        return place.name || place.address || '';
+    };
+
+    /**
      * Class for an individual line's own colour (u5, s41, ...), matching the
      * board's badges so the same line looks the same in every view.
      */
@@ -124,7 +133,7 @@ const JourneyView = (() => {
                     <span class="leg-time">${clockTime(leg.departure)}</span>
                     <span class="leg-body">
                         <span class="leg-title">Fußweg ${escapeHtml(distance)}</span>
-                        <span class="leg-sub">${escapeHtml(leg.origin && leg.origin.name || '')} &rarr; ${escapeHtml(leg.destination && leg.destination.name || '')}</span>
+                        <span class="leg-sub">${escapeHtml(placeName(leg.origin))} &rarr; ${escapeHtml(placeName(leg.destination))}</span>
                     </span>
                 </li>`;
         }
@@ -142,11 +151,11 @@ const JourneyView = (() => {
                 <span class="leg-body">
                     <span class="leg-title">
                         ${legBadgeHtml(leg)}
-                        <span class="leg-direction">${escapeHtml(leg.direction || (leg.destination && leg.destination.name) || '')}</span>
+                        <span class="leg-direction">${escapeHtml(leg.direction || placeName(leg.destination))}</span>
                     </span>
                     <span class="leg-sub">
-                        ab ${escapeHtml(leg.origin && leg.origin.name || '')}${platform ? ` &middot; Gl. ${escapeHtml(platform)}` : ''}
-                        &middot; an ${clockTime(leg.arrival || leg.plannedArrival)} ${escapeHtml(leg.destination && leg.destination.name || '')}
+                        ab ${escapeHtml(placeName(leg.origin))}${platform ? ` &middot; Gl. ${escapeHtml(platform)}` : ''}
+                        &middot; an ${clockTime(leg.arrival || leg.plannedArrival)} ${escapeHtml(placeName(leg.destination))}
                     </span>
                 </span>
             </li>`;
@@ -231,12 +240,14 @@ const JourneyView = (() => {
         const seen = new Set();
 
         const push = (stop, kind) => {
-            const loc = stop && stop.location;
+            // A stop nests its coordinates under `location`; an address origin
+            // is itself a location, with lat/lng at the top level.
+            const loc = (stop && stop.location) || stop;
             if (!loc || !isFinite(loc.latitude) || !isFinite(loc.longitude)) return;
             const key = `${loc.latitude},${loc.longitude}`;
             if (seen.has(key)) return;
             seen.add(key);
-            stops.push({ lat: loc.latitude, lng: loc.longitude, name: stop.name || '', kind });
+            stops.push({ lat: loc.latitude, lng: loc.longitude, name: placeName(stop), kind });
         };
 
         legs.forEach((leg, i) => {

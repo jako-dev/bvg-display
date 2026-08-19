@@ -178,7 +178,8 @@ button, input, select {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
+    flex-wrap: wrap;
+    gap: var(--space-3) var(--space-4);
     padding: var(--space-4) var(--gutter);
     border-bottom: 1px solid var(--line);
     background: var(--surface-1);
@@ -235,6 +236,56 @@ button, input, select {
     border-top: 1px solid var(--line);
     font-size: var(--text-xs);
     color: var(--text-3);
+}
+
+/* ===== View switch (header) ===== */
+.view-switch {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    flex-shrink: 0;
+}
+
+.view-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    border: none;
+    border-radius: calc(var(--radius-sm) - 1px);
+    background: transparent;
+    color: var(--text-3);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.view-btn svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* The journey and map glyphs read better as solid dots than as rings. */
+.view-btn svg circle { fill: currentColor; stroke: none; }
+.view-btn svg circle[r="1.7"] { fill: var(--surface-1); stroke: currentColor; }
+
+.view-btn:hover { color: var(--text-1); }
+
+.view-btn.active {
+    background: var(--surface-0);
+    color: var(--text-1);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 /* ===== Buttons ===== */
@@ -521,6 +572,33 @@ input.walk-time-input {
     font-size: var(--text-xs);
     color: var(--text-3);
 }
+
+.home-address-current {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.home-address-current:empty { display: none; }
+
+.home-address-label {
+    flex: 1;
+    min-width: 0;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    font-size: var(--text-sm);
+    word-break: break-word;
+}
+
+.map-line-select {
+    width: auto;
+    max-width: 260px;
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+}
+
+.map-line-select:disabled { color: var(--text-3); }
 
 .empty-hint {
     font-size: var(--text-sm);
@@ -1107,14 +1185,17 @@ body.kiosk-mode .display-header { padding-top: var(--space-2); padding-bottom: v
 body.kiosk-mode .display-footer { padding-top: var(--space-1); padding-bottom: var(--space-1); }
 body.kiosk-mode .station-tabs { display: none !important; }
 
-body.kiosk-mode .header-right .btn-icon {
+body.kiosk-mode .header-right .btn-icon,
+body.kiosk-mode .view-switch {
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--slow) var(--ease);
 }
 
 body.kiosk-mode:hover .header-right .btn-icon,
-body.kiosk-mode .display-header:hover .btn-icon {
+body.kiosk-mode .display-header:hover .btn-icon,
+body.kiosk-mode:hover .view-switch,
+body.kiosk-mode .display-header:hover .view-switch {
     opacity: 1;
     pointer-events: auto;
 }
@@ -1146,8 +1227,18 @@ body.kiosk-mode .display-header:hover .btn-icon {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 
 /* ===== Responsive ===== */
+@media (max-width: 1180px) {
+    /* Icons carry the meaning; the labels are the first thing to go. */
+    .view-btn span { display: none; }
+    .view-btn { padding: var(--space-1) var(--space-2); }
+}
+
 @media (max-width: 900px) {
     :root { --gutter: var(--space-4); }
+
+    /* Give the switch a full row rather than squeezing it next to the clock. */
+    .view-switch { order: 3; width: 100%; justify-content: space-between; }
+    .view-btn { flex: 1; justify-content: center; }
 
     .settings-panel {
         position: fixed;
