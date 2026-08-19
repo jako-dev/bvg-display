@@ -12,6 +12,9 @@
     const MAX_ALERTS = 3;
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
+    const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
+    const RADAR_INTERVAL_MS = 15000; // Live vehicle poll — one request per tick
+    const RADAR_MAX_VEHICLES = 80;
 
     // ===== State =====
     const state = {
@@ -27,6 +30,11 @@
         ledScrollSpeed: 3000,   // ms between scroll steps
         splitLeftId: null,      // Station shown in the left split pane
         splitRightId: null,     // Station shown in the right split pane
+        homeStationId: null,    // Journey origin — the "Home" the planner starts from
+        destination: null,      // Journey target {id, name}
+        mapLive: true,          // Poll /radar for live vehicles in the map view
+        mapTileUrl: null,       // Override the tile server (config.json only)
+        mapAttribution: null,   // Attribution shown for that tile server
         apiProvider: BvgApi.DEFAULT_PROVIDER,
         filters: {
             suburban: true,
@@ -48,6 +56,22 @@
     // card). Such a page load is read-only: it renders what the URL asks for
     // without writing it into this browser's saved settings.
     let persistDisabled = false;
+
+    // Journey planner + map runtime state. Not persisted: results go stale in
+    // minutes, and a saved map route would be a route through yesterday.
+    let journeys = [];
+    let selectedJourney = -1;
+    let radarTimer = null;
+    let mapReady = false;
+    let mapInitPromise = null;
+    let shownRoute = null;   // { tripId, label } of the trip route on the map
+    // Set by whatever triggered the map (a journey, a departure row) and
+    // consumed once the map view is actually up.
+    let pendingMapScene = null;
+    // Search results keyed by station ID. The rendered markup only carries the
+    // ID and name, but a station's coordinates are what the radar bounding box
+    // is built from, so the full objects are kept until the pick is made.
+    let lastSearchResults = new Map();
 
     // ===== DOM References =====
     const dom = {
@@ -91,6 +115,23 @@
         ledCanvas: document.getElementById('led-canvas'),
         ledScrollToggle: document.getElementById('led-scroll-toggle'),
         ledScrollSpeed: document.getElementById('led-scroll-speed'),
+        // Journey planner
+        viewJourney: document.getElementById('view-journey'),
+        journeyView: document.getElementById('journey-view'),
+        journeyFrom: document.getElementById('journey-from'),
+        journeyTo: document.getElementById('journey-to'),
+        journeyToResults: document.getElementById('journey-to-results'),
+        journeySearch: document.getElementById('journey-search'),
+        journeyResults: document.getElementById('journey-results'),
+        // Map
+        viewMap: document.getElementById('view-map'),
+        mapView: document.getElementById('map-view'),
+        mapContainer: document.getElementById('map-container'),
+        mapTitle: document.getElementById('map-title'),
+        mapLiveToggle: document.getElementById('map-live-toggle'),
+        mapFit: document.getElementById('map-fit'),
+        mapClear: document.getElementById('map-clear'),
+        mapStatus: document.getElementById('map-status'),
         // Kiosk
         kioskBtn: document.getElementById('kiosk-btn'),
         kioskToggle: document.getElementById('kiosk-toggle')
@@ -123,6 +164,7 @@
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        renderJourneyControls();
         updateDataSourceLabel();
 
         if (state.kioskMode) {
@@ -191,6 +233,11 @@
         }
         if (!has(state.splitLeftId)) state.splitLeftId = null;
         if (!has(state.splitRightId)) state.splitRightId = null;
+        // No explicit home yet (or it was removed) — the first station is the
+        // most useful guess, and the planner is unusable without an origin.
+        if (!has(state.homeStationId)) {
+            state.homeStationId = state.stations.length > 0 ? state.stations[0].id : null;
+        }
     }
 
     function loadState() {
@@ -206,15 +253,18 @@
                 state.activeStationId = parsed.activeStationId || null;
                 state.splitLeftId = parsed.splitLeftId || null;
                 state.splitRightId = parsed.splitRightId || null;
+                state.homeStationId = parsed.homeStationId || null;
             }
             state.departureCount = parsed.departureCount || state.departureCount;
             state.refreshInterval = clamp(parsed.refreshInterval || state.refreshInterval, 10, 120);
             if (parsed.theme) state.theme = parsed.theme === 'modern' ? 'modern' : 'dark';
-            if (['single', 'split', 'led'].includes(parsed.viewMode)) state.viewMode = parsed.viewMode;
+            if (VIEW_MODES.includes(parsed.viewMode)) state.viewMode = parsed.viewMode;
             if (parsed.kioskMode !== undefined) state.kioskMode = !!parsed.kioskMode;
             if (parsed.ledScrollEnabled !== undefined) state.ledScrollEnabled = parsed.ledScrollEnabled !== false;
             state.ledScrollSpeed = parsed.ledScrollSpeed || state.ledScrollSpeed;
             state.apiProvider = parsed.apiProvider || state.apiProvider;
+            if (parsed.mapLive !== undefined) state.mapLive = parsed.mapLive !== false;
+            if (parsed.destination && parsed.destination.id) state.destination = parsed.destination;
             state.filters = { ...state.filters, ...parsed.filters };
             BvgApi.setProvider(state.apiProvider);
             // setProvider ignores unknown hosts — mirror back what it accepted.
@@ -239,6 +289,9 @@
                 ledScrollSpeed: state.ledScrollSpeed,
                 splitLeftId: state.splitLeftId,
                 splitRightId: state.splitRightId,
+                homeStationId: state.homeStationId,
+                destination: state.destination,
+                mapLive: state.mapLive,
                 apiProvider: state.apiProvider,
                 filters: state.filters
             }));
@@ -280,6 +333,7 @@
         document.addEventListener('click', (e) => {
             if (!e.target.closest('.search-wrapper')) {
                 dom.searchResults.classList.add('hidden');
+                dom.journeyToResults.classList.add('hidden');
             }
             if (dom.settingsPanel.classList.contains('open') &&
                 !dom.settingsPanel.contains(e.target) &&
@@ -293,7 +347,8 @@
         dom.searchResults.addEventListener('click', (e) => {
             const item = e.target.closest('.search-result-item[data-id]');
             if (!item) return;
-            addStation(item.dataset.id, item.dataset.name);
+            const hit = lastSearchResults.get(item.dataset.id);
+            addStation(item.dataset.id, item.dataset.name, hit && hit.location);
             dom.searchResults.classList.add('hidden');
             dom.stationSearch.value = '';
         });
@@ -368,7 +423,105 @@
         // View mode
         dom.viewSingle.addEventListener('click', () => applyViewMode('single'));
         dom.viewSplit.addEventListener('click', () => applyViewMode('split'));
+        dom.viewJourney.addEventListener('click', () => applyViewMode('journey'));
+        dom.viewMap.addEventListener('click', () => applyViewMode('map'));
         dom.viewLed.addEventListener('click', () => applyViewMode('led'));
+
+        // Journey planner
+        dom.journeyFrom.addEventListener('change', (e) => {
+            state.homeStationId = e.target.value || null;
+            saveState();
+            fetchJourneys();
+        });
+
+        let destTimeout;
+        dom.journeyTo.addEventListener('input', (e) => {
+            clearTimeout(destTimeout);
+            const query = e.target.value;
+            if (query.trim().length < 2) {
+                dom.journeyToResults.classList.add('hidden');
+                return;
+            }
+            destTimeout = setTimeout(() => searchDestination(query), SEARCH_DEBOUNCE_MS);
+        });
+
+        dom.journeyToResults.addEventListener('click', (e) => {
+            const item = e.target.closest('.search-result-item[data-id]');
+            if (!item) return;
+            state.destination = { id: item.dataset.id, name: item.dataset.name };
+            dom.journeyTo.value = item.dataset.name;
+            dom.journeyToResults.classList.add('hidden');
+            saveState();
+            fetchJourneys();
+        });
+
+        dom.journeySearch.addEventListener('click', () => fetchJourneys());
+        dom.journeyTo.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && state.destination) {
+                dom.journeyToResults.classList.add('hidden');
+                fetchJourneys();
+            }
+        });
+
+        // A connection card opens that journey on the map.
+        const openJourney = (target) => {
+            const card = target.closest('.journey-card[data-index]');
+            if (card) showJourneyOnMap(parseInt(card.dataset.index, 10));
+        };
+        dom.journeyResults.addEventListener('click', (e) => openJourney(e.target));
+        dom.journeyResults.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                if (e.target.closest('.journey-card[data-index]')) {
+                    e.preventDefault();
+                    openJourney(e.target);
+                }
+            }
+        });
+
+        // Map controls
+        dom.mapLiveToggle.addEventListener('change', (e) => {
+            state.mapLive = e.target.checked;
+            saveState();
+            if (state.mapLive) {
+                fetchRadar();
+                startRadarTimer();
+            } else {
+                stopRadarTimer();
+                TransitMap.setVehicles([]);
+            }
+        });
+        dom.mapFit.addEventListener('click', () => TransitMap.fit());
+        dom.mapClear.addEventListener('click', () => {
+            shownRoute = null;
+            selectedJourney = -1;
+            TransitMap.setRoutes([]);
+            TransitMap.setStops([]);
+            dom.mapTitle.textContent = 'Karte';
+            setMapStatus('');
+        });
+
+        // A departure row opens that trip's route on the map.
+        const openTrip = (row) => {
+            if (!row || !row.dataset.tripId) return;
+            showTripOnMap(row.dataset.tripId, row.dataset.tripLabel || '');
+        };
+        dom.departuresList.addEventListener('click', (e) => openTrip(e.target.closest('.departure-row[data-trip-id]')));
+        dom.splitDeparturesLeft.addEventListener('click', (e) => openTrip(e.target.closest('.departure-row[data-trip-id]')));
+        dom.splitDeparturesRight.addEventListener('click', (e) => openTrip(e.target.closest('.departure-row[data-trip-id]')));
+
+        // Home station picker in the saved-stations list
+        dom.savedStations.addEventListener('click', (e) => {
+            const btn = e.target.closest('.btn-home[data-id]');
+            if (!btn) return;
+            state.homeStationId = btn.dataset.id;
+            saveState();
+            renderSavedStations();
+            renderJourneyControls();
+        });
+
+        window.addEventListener('resize', () => {
+            if (state.viewMode === 'map') TransitMap.refresh();
+        });
 
         // Split view station pickers
         dom.splitLeftSelect.addEventListener('change', (e) => {
@@ -449,6 +602,7 @@
     }
 
     function renderSearchResults(results) {
+        lastSearchResults = new Map(results.map(stop => [String(stop.id), stop]));
         if (results.length === 0) {
             dom.searchResults.innerHTML = '<div class="search-result-item">Keine Ergebnisse</div>';
         } else {
@@ -484,14 +638,20 @@
     }
 
     // ===== Station Management =====
-    function addStation(id, name) {
+    function addStation(id, name, location) {
         if (state.stations.some(s => s.id === id)) return; // Already added
-        state.stations.push({ id, name, walkTime: 0 });
+        const station = { id, name, walkTime: 0 };
+        if (location && isFinite(location.latitude) && isFinite(location.longitude)) {
+            station.lat = location.latitude;
+            station.lng = location.longitude;
+        }
+        state.stations.push(station);
         state.activeStationId = id;
         saveState();
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        renderJourneyControls();
         closeSettings();
         refreshCurrentView();
     }
@@ -505,6 +665,7 @@
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        renderJourneyControls();
         refreshCurrentView();
     }
 
@@ -515,20 +676,30 @@
      * the board itself already works, the ID is just an ugly placeholder.
      */
     async function resolveStationNames() {
-        const pending = state.stations.filter(s => !s.name || s.name === s.id);
+        // Config-supplied stations arrive as bare IDs, and stations saved before
+        // coordinates were stored have a name but no position — both need a
+        // lookup before the map can place them.
+        const pending = state.stations.filter(s =>
+            !s.name || s.name === s.id || !isFinite(s.lat) || !isFinite(s.lng));
         if (pending.length === 0) return;
 
         let resolved = false;
         for (const station of pending) {
             try {
                 const data = await BvgApi.getStation(station.id);
-                const name = data && (data.name || (data.stop && data.stop.name));
-                if (name) {
-                    station.name = name;
+                const stop = (data && data.stop) || data || {};
+                if (stop.name && (!station.name || station.name === station.id)) {
+                    station.name = stop.name;
+                    resolved = true;
+                }
+                const loc = stop.location;
+                if (loc && isFinite(loc.latitude) && isFinite(loc.longitude)) {
+                    station.lat = loc.latitude;
+                    station.lng = loc.longitude;
                     resolved = true;
                 }
             } catch (e) {
-                console.warn(`Could not resolve name for station ${station.id}:`, e.message);
+                console.warn(`Could not resolve station ${station.id}:`, e.message);
             }
         }
         if (!resolved) return;
@@ -537,7 +708,12 @@
         renderSavedStations();
         renderSplitStationSelects();
         renderStationTabs();
+        renderJourneyControls();
         updateStationHeadings();
+
+        // The radar bounding box is derived from station coordinates, so a map
+        // opened before they resolved had nothing to query with.
+        if (state.viewMode === 'map' && state.mapLive) fetchRadar();
     }
 
     /** Re-label the headers for whichever view is currently on screen */
@@ -558,8 +734,14 @@
             return;
         }
 
-        dom.savedStations.innerHTML = state.stations.map(station => `
-            <div class="saved-station">
+        dom.savedStations.innerHTML = state.stations.map(station => {
+            const isHome = station.id === state.homeStationId;
+            return `
+            <div class="saved-station${isHome ? ' is-home' : ''}">
+                <button class="btn-home${isHome ? ' active' : ''}" data-id="${escapeHtml(station.id)}"
+                        aria-pressed="${isHome ? 'true' : 'false'}"
+                        aria-label="${escapeHtml(station.name)} als Start setzen"
+                        title="Als Start für die Verbindungssuche">&#9733;</button>
                 <span class="station-info">${escapeHtml(station.name)}</span>
                 <input type="number" class="walk-time-input" data-id="${escapeHtml(station.id)}"
                        min="0" max="30" value="${station.walkTime || 0}"
@@ -568,8 +750,8 @@
                 <span class="walk-time-unit">min</span>
                 <button class="btn-remove" data-id="${escapeHtml(station.id)}"
                         aria-label="${escapeHtml(station.name)} entfernen" title="Entfernen">&times;</button>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     }
 
     /**
@@ -749,8 +931,16 @@
         if (dep.cancelled === true) rowClass += ' cancelled';
         else if (dep.delay > DELAY_THRESHOLD_SEC) rowClass += ' delayed';
 
+        // Rows with a trip are clickable: they open that trip's route on the
+        // map. Without a tripId the API can't give us a shape, so the row stays
+        // inert rather than advertising an action that would fail.
+        const tripAttrs = dep.tripId
+            ? ` data-trip-id="${escapeHtml(dep.tripId)}" data-trip-label="${escapeHtml(`${lineName} → ${dep.direction || ''}`.trim())}" role="button" tabindex="0" title="Route auf der Karte zeigen"`
+            : '';
+        if (dep.tripId) rowClass += ' is-clickable';
+
         return `
-            <div class="${rowClass}">
+            <div class="${rowClass}"${tripAttrs}>
                 <span class="col-line">
                     <span class="line-badge ${escapeHtml(lineProduct)} ${lineClass}">${escapeHtml(lineName)}</span>
                 </span>
@@ -876,6 +1066,10 @@
             fetchSplitDepartures();
         } else if (state.viewMode === 'led') {
             fetchLedDepartures();
+        } else if (state.viewMode === 'journey') {
+            if (state.destination) fetchJourneys();
+        } else if (state.viewMode === 'map') {
+            fetchRadar();
         } else if (state.activeStationId) {
             fetchDepartures();
         } else {
@@ -888,19 +1082,52 @@
         state.viewMode = mode;
         dom.viewSingle.classList.toggle('active', mode === 'single');
         dom.viewSplit.classList.toggle('active', mode === 'split');
+        dom.viewJourney.classList.toggle('active', mode === 'journey');
+        dom.viewMap.classList.toggle('active', mode === 'map');
         dom.viewLed.classList.toggle('active', mode === 'led');
 
         // Hide all views first
         dom.singleView.classList.add('hidden');
         dom.splitView.classList.add('hidden');
+        dom.journeyView.classList.add('hidden');
+        dom.mapView.classList.add('hidden');
         dom.ledView.classList.add('hidden');
         dom.stationTabs.classList.add('hidden');
         dom.alertsBanner.classList.add('hidden');
 
         // The LED scroll timer keeps redrawing an off-screen canvas otherwise.
         if (mode !== 'led') LedRenderer.stopScroll();
+        // Same for the radar poll — no point paying for requests off-screen.
+        if (mode !== 'map') stopRadarTimer();
 
-        if (mode === 'split') {
+        if (mode === 'journey') {
+            dom.journeyView.classList.remove('hidden');
+            dom.currentStationName.textContent = 'Verbindung suchen';
+            renderJourneyControls();
+            if (journeys.length > 0) {
+                JourneyView.render(dom.journeyResults, journeys, { selectedIndex: selectedJourney });
+            } else if (state.destination) {
+                fetchJourneys();
+            } else {
+                showJourneyMessage('<p>W&auml;hle ein Ziel, um Verbindungen zu sehen.</p>');
+            }
+            stopRefreshTimer();
+        } else if (mode === 'map') {
+            dom.mapView.classList.remove('hidden');
+            dom.currentStationName.textContent = 'Karte';
+            dom.mapLiveToggle.checked = state.mapLive;
+            // The container has a size only now that the view is visible, so the
+            // map is created/measured here rather than up front.
+            initMapView().then(() => {
+                TransitMap.refresh(); // the container only has a size now
+                applyPendingMapScene();
+                if (state.mapLive) {
+                    fetchRadar();
+                    startRadarTimer();
+                }
+            });
+            stopRefreshTimer();
+        } else if (mode === 'split') {
             dom.splitView.classList.remove('hidden');
             dom.currentStationName.textContent = 'BVG Abfahrtsmonitor';
             fetchSplitDepartures();
@@ -1003,6 +1230,280 @@
         container.innerHTML = departures.length === 0
             ? '<div class="loading"><p>Keine Abfahrten.</p></div>'
             : departures.map(departureRowHtml).join('');
+    }
+
+    // ===== Journey Planner =====
+
+    function getHomeStation() {
+        return state.stations.find(s => s.id === state.homeStationId)
+            || state.stations[0]
+            || null;
+    }
+
+    function renderJourneyControls() {
+        const home = getHomeStation();
+        dom.journeyFrom.innerHTML = state.stations.map(station =>
+            `<option value="${escapeHtml(station.id)}"${home && station.id === home.id ? ' selected' : ''}>${escapeHtml(station.name)}</option>`
+        ).join('') || '<option value="">Keine Station gespeichert</option>';
+        dom.journeyFrom.disabled = state.stations.length === 0;
+
+        if (state.destination && dom.journeyTo.value !== state.destination.name) {
+            dom.journeyTo.value = state.destination.name || state.destination.id;
+        }
+    }
+
+    async function searchDestination(query) {
+        try {
+            const results = await BvgApi.searchStations(query);
+            if (results.length === 0) {
+                dom.journeyToResults.innerHTML = '<div class="search-result-item">Keine Ergebnisse</div>';
+            } else {
+                dom.journeyToResults.innerHTML = results.map(stop => `
+                    <div class="search-result-item" data-id="${escapeHtml(stop.id)}" data-name="${escapeHtml(stop.name)}">
+                        <div>${escapeHtml(stop.name)}</div>
+                        <div class="result-products">${getProductBadges(stop.products)}</div>
+                    </div>
+                `).join('');
+            }
+            dom.journeyToResults.classList.remove('hidden');
+        } catch (e) {
+            console.error('Destination search failed:', e);
+            dom.journeyToResults.innerHTML = '<div class="search-result-item">Fehler bei der Suche</div>';
+            dom.journeyToResults.classList.remove('hidden');
+        }
+    }
+
+    function showJourneyMessage(html) {
+        dom.journeyResults.innerHTML = `<div class="journey-empty">${html}</div>`;
+    }
+
+    async function fetchJourneys() {
+        const home = getHomeStation();
+        if (!home) {
+            showJourneyMessage('<p>Bitte zuerst eine Station in den Einstellungen speichern.</p>');
+            return;
+        }
+        if (!state.destination || !state.destination.id) {
+            showJourneyMessage('<p>Bitte ein Ziel ausw&auml;hlen.</p>');
+            return;
+        }
+        if (state.destination.id === home.id) {
+            showJourneyMessage('<p>Start und Ziel sind dieselbe Station.</p>');
+            return;
+        }
+
+        const token = ++requestToken;
+        showJourneyMessage('<p>Suche Verbindungen&hellip;</p>');
+
+        try {
+            // Walk time from the origin is dead time before boarding, so the
+            // search starts when you would actually arrive at the platform.
+            const departure = home.walkTime > 0
+                ? new Date(Date.now() + home.walkTime * 60000)
+                : null;
+
+            const data = await BvgApi.getJourneys(home.id, state.destination.id, state.filters, {
+                results: 5,
+                polylines: true,
+                departure
+            });
+            if (token !== requestToken) return;
+
+            journeys = Array.isArray(data.journeys) ? data.journeys : [];
+            selectedJourney = -1;
+            JourneyView.render(dom.journeyResults, journeys, { selectedIndex: selectedJourney });
+            updateLastRefreshTime();
+        } catch (e) {
+            if (token !== requestToken) return;
+            console.error('Journey search failed:', e);
+            showJourneyMessage(`<p class="error-text">Verbindungssuche fehlgeschlagen.</p>
+                                <p class="error-detail">${escapeHtml(e.message)}</p>`);
+        }
+    }
+
+    /** Draw one connection on the map and switch to it. */
+    function showJourneyOnMap(index) {
+        const journey = journeys[index];
+        if (!journey) return;
+
+        selectedJourney = index;
+        JourneyView.render(dom.journeyResults, journeys, { selectedIndex: selectedJourney });
+
+        const home = getHomeStation();
+        const label = `${home ? home.name : '?'} → ${state.destination ? state.destination.name : '?'}`;
+        pendingMapScene = {
+            title: label,
+            routes: JourneyView.toRoutes(journey),
+            stops: JourneyView.toStops(journey)
+        };
+        shownRoute = null;
+        applyViewMode('map');
+        // If the map was already up, applyViewMode's init promise resolves
+        // immediately — but the scene still has to be pushed through it.
+        initMapView().then(applyPendingMapScene);
+    }
+
+    // ===== Map =====
+
+    // Set once the map drops to the schematic backend. It outlives any
+    // transient "loading…" message: clearing the status must not hide the fact
+    // that what you are looking at is not a real map.
+    let mapFallbackNote = '';
+
+    function setMapStatus(text, isWarning) {
+        const message = text || mapFallbackNote;
+        dom.mapStatus.textContent = message;
+        dom.mapStatus.classList.toggle('is-warning', text ? !!isWarning : !!mapFallbackNote);
+    }
+
+    /**
+     * Bring the map up, at most once. The promise is cached because both the
+     * view switch and whatever asked for the map (a journey, a departure row)
+     * need to wait for the same initialisation — starting a second one would
+     * race two Leaflet instances into the same container.
+     */
+    function initMapView() {
+        if (mapInitPromise) return mapInitPromise;
+
+        setMapStatus('Karte wird geladen…');
+        mapInitPromise = TransitMap.init(dom.mapContainer, {
+            tileUrl: state.mapTileUrl,
+            attribution: state.mapAttribution,
+            onFallback: (reason) => {
+                mapFallbackNote = `${reason} — schematische Ansicht.`;
+                setMapStatus('', true);
+            }
+        }).then((backend) => {
+            mapReady = true;
+            if (backend === 'leaflet') setMapStatus('');
+            return backend;
+        });
+
+        return mapInitPromise;
+    }
+
+    function applyPendingMapScene() {
+        if (!pendingMapScene) return;
+        dom.mapTitle.textContent = pendingMapScene.title || 'Karte';
+        TransitMap.setRoutes(pendingMapScene.routes || []);
+        TransitMap.setStops(pendingMapScene.stops || []);
+        TransitMap.fit();
+        pendingMapScene = null;
+    }
+
+    /** Fetch and draw the geographic shape of one trip. */
+    async function showTripOnMap(tripId, label) {
+        if (!tripId) return;
+
+        shownRoute = { tripId, label };
+        // No pending scene here: this one is fetched, and an empty placeholder
+        // would be applied after the fetch resolves and wipe the route again.
+        pendingMapScene = null;
+        applyViewMode('map');
+        dom.mapTitle.textContent = label || 'Route';
+
+        const token = ++requestToken;
+        setMapStatus('Route wird geladen…');
+        try {
+            // The map has to exist before anything can be drawn on it, and the
+            // trip fetch is independent of it — so wait on both, not in series.
+            const [data] = await Promise.all([BvgApi.getTrip(tripId, true), initMapView()]);
+            if (token !== requestToken || !shownRoute || shownRoute.tripId !== tripId) return;
+
+            const trip = data.trip || {};
+            const points = BvgApi.polylineToLatLngs(trip.polyline);
+            if (points.length < 2) {
+                setMapStatus('Für diese Fahrt liegt keine Route vor.', true);
+                return;
+            }
+
+            const stations = BvgApi.polylineStations(trip.polyline);
+            dom.mapTitle.textContent = label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim();
+            TransitMap.setRoutes([{
+                points,
+                product: (trip.line && trip.line.product) || '',
+                label: (trip.line && trip.line.name) || ''
+            }]);
+            TransitMap.setStops(stations.map((st, i) => ({
+                lat: st.lat, lng: st.lng, name: st.name,
+                kind: i === 0 ? 'origin' : (i === stations.length - 1 ? 'destination' : 'stop')
+            })));
+            TransitMap.fit();
+            setMapStatus('');
+        } catch (e) {
+            if (token !== requestToken) return;
+            console.error('Trip route failed:', e);
+            setMapStatus(`Route konnte nicht geladen werden: ${e.message}`, true);
+        }
+    }
+
+    /**
+     * Bounding box for the radar query. Prefers what the map is showing;
+     * falls back to a box around the saved stations before the map has a size.
+     */
+    function radarBounds() {
+        const points = [];
+        for (const station of state.stations) {
+            if (isFinite(station.lat) && isFinite(station.lng)) points.push([station.lat, station.lng]);
+        }
+
+        const mapBounds = TransitMap.getBounds && TransitMap.getBounds();
+        if (mapBounds) return mapBounds;
+        if (points.length === 0) return null;
+
+        const lats = points.map(p => p[0]);
+        const lngs = points.map(p => p[1]);
+        // Pad the box so vehicles heading toward the stations are visible too.
+        const pad = 0.012;
+        return {
+            north: Math.max(...lats) + pad,
+            south: Math.min(...lats) - pad,
+            east: Math.max(...lngs) + pad,
+            west: Math.min(...lngs) - pad
+        };
+    }
+
+    async function fetchRadar() {
+        if (!state.mapLive || state.viewMode !== 'map') return;
+
+        const bounds = radarBounds();
+        if (!bounds) return;
+
+        try {
+            const data = await BvgApi.getRadar(bounds, {
+                results: RADAR_MAX_VEHICLES,
+                duration: 30,
+                frames: 3,
+                polylines: false
+            });
+            if (state.viewMode !== 'map') return;
+
+            const movements = Array.isArray(data.movements) ? data.movements : [];
+            TransitMap.setVehicles(movements.map(movement => ({
+                lat: movement.location && movement.location.latitude,
+                lng: movement.location && movement.location.longitude,
+                label: (movement.line && movement.line.name) || '?',
+                product: (movement.line && movement.line.product) || '',
+                direction: movement.direction || ''
+            })).filter(v => isFinite(v.lat) && isFinite(v.lng)));
+            updateLastRefreshTime();
+        } catch (e) {
+            console.warn('Radar poll failed:', e.message);
+            setMapStatus(`Live-Fahrzeuge nicht verfügbar: ${e.message}`, true);
+        }
+    }
+
+    function startRadarTimer() {
+        stopRadarTimer();
+        if (!state.mapLive) return;
+        radarTimer = setInterval(fetchRadar, RADAR_INTERVAL_MS);
+    }
+
+    function stopRadarTimer() {
+        if (radarTimer) {
+            clearInterval(radarTimer);
+            radarTimer = null;
+        }
     }
 
     // ===== Kiosk Mode =====

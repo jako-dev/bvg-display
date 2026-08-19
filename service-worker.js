@@ -8,7 +8,7 @@
 
 // Bump this whenever a shell file changes so clients pick up the new set
 // instead of serving a stale mix of old and new files.
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = `bvg-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [
@@ -20,6 +20,8 @@ const SHELL_FILES = [
     './js/app.js',
     './js/config.js',
     './js/led-renderer.js',
+    './js/map.js',
+    './js/journey.js',
     './icons/icon-192.png',
     './icons/icon-512.png'
 ];
@@ -27,7 +29,14 @@ const SHELL_FILES = [
 // Deployment config. Optional by design — a deployment without it just has no
 // preset stations — so it is cached separately: addAll() rejects the whole
 // batch on a single 404 and would leave the app with no offline shell at all.
-const OPTIONAL_FILES = ['./config.json'];
+// Leaflet is vendored but only loaded when the map view opens, so it is
+// precached alongside config.json rather than in the critical shell batch —
+// a deployment that drops the vendor directory still gets a working board.
+const OPTIONAL_FILES = [
+    './config.json',
+    './vendor/leaflet/leaflet.js',
+    './vendor/leaflet/leaflet.css'
+];
 
 self.addEventListener('install', (event) => {
     event.waitUntil(

@@ -169,7 +169,16 @@ const TransitMap = (() => {
 
     function fallbackToSvg(reason) {
         if (map) {
-            map.remove();
+            // Drop our own layers before tearing the map down. A scene drawn
+            // while the tile probe was still running leaves markers whose DOM
+            // position Leaflet never computed, and removing the map with those
+            // still attached throws on `_leaflet_pos`.
+            try {
+                if (layerGroup) layerGroup.clearLayers();
+                map.remove();
+            } catch (e) {
+                console.warn('Leaflet teardown failed, continuing to schematic:', e.message);
+            }
             map = null;
             layerGroup = null;
         }
@@ -256,7 +265,7 @@ const TransitMap = (() => {
     }
 
     function renderLeaflet() {
-        if (!layerGroup || !window.L) return;
+        if (!map || !layerGroup || !window.L) return;
         const L = window.L;
         layerGroup.clearLayers();
 
@@ -386,6 +395,24 @@ const TransitMap = (() => {
         }
     }
 
+    /**
+     * The area currently visible, as a radar-ready bounding box.
+     * Only meaningful for the Leaflet backend — the schematic has no viewport
+     * of its own, it just draws whatever it is given.
+     * @returns {{north: number, south: number, east: number, west: number}|null}
+     */
+    function getBounds() {
+        if (mode !== 'leaflet' || !map) return null;
+        const bounds = map.getBounds();
+        if (!bounds) return null;
+        return {
+            north: bounds.getNorth(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            west: bounds.getWest()
+        };
+    }
+
     /** Recompute layout after the container changed size (view switch, resize). */
     function refresh() {
         if (mode === 'leaflet' && map) map.invalidateSize();
@@ -412,6 +439,7 @@ const TransitMap = (() => {
 
     return {
         init,
+        getBounds,
         setRoutes,
         setStops,
         setVehicles,

@@ -25,7 +25,7 @@ const AppConfig = (() => {
     const CONFIG_URL = './config.json';
     const CONFIG_TIMEOUT = 4000; // ms — never let a missing/slow file stall startup
 
-    const VIEW_MODES = ['single', 'split', 'led'];
+    const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
     const THEMES = ['dark', 'modern'];
     const TRUE_VALUES = ['1', 'true', 'yes', 'on'];
     const FALSE_VALUES = ['0', 'false', 'no', 'off'];
@@ -169,7 +169,26 @@ const AppConfig = (() => {
         const filters = parseFilters(raw.filters);
         if (filters) settings.filters = filters;
 
-        for (const key of ['activeStationId', 'splitLeftId', 'splitRightId']) {
+        const mapLive = toBool(raw.mapLive);
+        if (mapLive !== undefined) settings.mapLive = mapLive;
+
+        // Tile server override — deployment-level only. Not accepted from the
+        // URL, where it would let any link repoint the map at an arbitrary host.
+        if (typeof raw.mapTileUrl === 'string' && /^https?:\/\//.test(raw.mapTileUrl)) {
+            settings.mapTileUrl = raw.mapTileUrl;
+        }
+        if (typeof raw.mapAttribution === 'string' && raw.mapAttribution.trim()) {
+            settings.mapAttribution = raw.mapAttribution.trim();
+        }
+
+        // A destination may be given as a bare ID or as "id|Name", the same
+        // shorthand stations use — reuse the parser rather than a second syntax.
+        if (raw.destination !== null && raw.destination !== undefined && raw.destination !== '') {
+            const dest = parseStation(raw.destination);
+            if (dest) settings.destination = { id: dest.id, name: dest.name || '' };
+        }
+
+        for (const key of ['activeStationId', 'splitLeftId', 'splitRightId', 'homeStationId']) {
             if (raw[key] !== null && raw[key] !== undefined && raw[key] !== '') {
                 settings[key] = String(raw[key]);
             }
@@ -216,7 +235,10 @@ const AppConfig = (() => {
             filters: first('filter', 'filters'),
             activeStationId: first('active'),
             splitLeftId: first('left'),
-            splitRightId: first('right')
+            splitRightId: first('right'),
+            homeStationId: first('home'),
+            destination: first('to', 'destination'),
+            mapLive: first('live')
         };
         for (const [key, value] of Object.entries(map)) {
             if (value !== null) raw[key] = value;

@@ -86,6 +86,8 @@
                     <div class="view-mode-switch">
                         <button id="view-single" class="btn-theme active">Einzelstation</button>
                         <button id="view-split" class="btn-theme">Split-View</button>
+                        <button id="view-journey" class="btn-theme">Verbindung</button>
+                        <button id="view-map" class="btn-theme">Karte</button>
                         <button id="view-led" class="btn-theme">LED-Panel</button>
                     </div>
                     <p class="setting-hint" id="split-hint">Split-View zeigt zwei Stationen nebeneinander (mind. 2 Stationen nötig).</p>
@@ -224,6 +226,39 @@
                 </div>
             </div>
 
+            <!-- Journey Planner View -->
+            <div id="journey-view" class="journey-view hidden">
+                <div class="journey-controls">
+                    <div class="journey-endpoint">
+                        <label for="journey-from">Von</label>
+                        <select id="journey-from"></select>
+                    </div>
+                    <span class="journey-arrow" aria-hidden="true">&rarr;</span>
+                    <div class="journey-endpoint search-wrapper">
+                        <label for="journey-to">Nach</label>
+                        <input type="text" id="journey-to" placeholder="Ziel suchen&hellip;" autocomplete="off">
+                        <div id="journey-to-results" class="search-results hidden"></div>
+                    </div>
+                    <button id="journey-search" class="btn-primary">Verbindungen</button>
+                </div>
+                <div id="journey-results" class="journey-results" aria-live="polite"></div>
+            </div>
+
+            <!-- Map View -->
+            <div id="map-view" class="map-view hidden">
+                <div class="map-toolbar">
+                    <span class="map-title" id="map-title">Karte</span>
+                    <label class="toggle-label map-live">
+                        <input type="checkbox" id="map-live-toggle" checked>
+                        <span>Live-Fahrzeuge</span>
+                    </label>
+                    <button id="map-fit" class="btn-ghost">Ansicht anpassen</button>
+                    <button id="map-clear" class="btn-ghost">Route l&ouml;schen</button>
+                    <span class="map-status" id="map-status"></span>
+                </div>
+                <div id="map-container" class="map-container"></div>
+            </div>
+
             <!-- LED Panel Emulation View -->
             <div id="led-view" class="led-view hidden">
                 <div class="led-frame">
@@ -242,6 +277,8 @@
     <script src="js/api.js" defer></script>
     <script src="js/config.js" defer></script>
     <script src="js/led-renderer.js" defer></script>
+    <script src="js/map.js" defer></script>
+    <script src="js/journey.js" defer></script>
     <script src="js/app.js" defer></script>
 </body>
 </html>

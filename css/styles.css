@@ -1057,3 +1057,213 @@ body.kiosk-mode .station-tabs {
         animation: none;
     }
 }
+
+/* ===== Journey Planner ===== */
+.journey-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.journey-controls {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--header-bg);
+    flex-wrap: wrap;
+}
+
+.journey-endpoint {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 180px;
+    flex: 1;
+    position: relative;
+}
+
+.journey-endpoint label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+}
+
+.journey-arrow {
+    color: var(--text-muted);
+    padding-bottom: 8px;
+    font-size: 1.1rem;
+}
+
+.journey-results {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.journey-empty {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 40px 20px;
+}
+
+.journey-card {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    background: var(--bg-row);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: border-color var(--transition-speed), background var(--transition-speed);
+}
+
+.journey-card:hover,
+.journey-card:focus-visible {
+    border-color: var(--accent);
+    background: var(--bg-row-hover);
+    outline: none;
+}
+
+.journey-card.is-selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.journey-card.is-cancelled .journey-leave { color: var(--cancelled-color); }
+.journey-card.is-delayed .journey-delay { color: var(--delay-color); }
+
+.journey-card-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.journey-leave {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.journey-window { color: var(--text-secondary); }
+.journey-delay { color: var(--delay-color); font-weight: 700; margin-left: 4px; }
+.journey-meta { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
+.journey-cancelled { color: var(--cancelled-color); }
+
+.journey-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.leg-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius);
+    font-weight: 700;
+    font-size: 0.85rem;
+    background: var(--bg-input);
+    color: var(--text-secondary);
+}
+
+.leg-walk { background: transparent; border: 1px dashed var(--border-color); color: var(--text-muted); font-weight: 400; }
+.leg-arrow { color: var(--text-muted); }
+
+.journey-legs {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 10px;
+}
+
+.journey-leg {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.journey-leg.is-cancelled { text-decoration: line-through; opacity: 0.6; }
+
+.leg-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    min-width: 62px;
+}
+
+.leg-delay { color: var(--delay-color); font-weight: 700; margin-left: 4px; }
+.leg-body { display: flex; flex-direction: column; gap: 2px; }
+.leg-title { display: flex; align-items: center; gap: 8px; }
+.leg-direction { color: var(--text-secondary); }
+.leg-sub { color: var(--text-muted); font-size: 0.8rem; }
+
+/* ===== Map ===== */
+.map-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.map-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--header-bg);
+    flex-wrap: wrap;
+}
+
+.map-title { font-weight: 700; color: var(--text-primary); }
+.map-status { color: var(--text-muted); font-size: 0.8rem; margin-left: auto; }
+.map-status.is-warning { color: var(--alert-border); }
+
+.map-container { flex: 1; min-height: 0; position: relative; }
+.map-canvas { position: absolute; inset: 0; }
+.map-canvas-svg { display: flex; align-items: center; justify-content: center; background: var(--bg-board); }
+.map-schematic { width: 100%; height: 100%; }
+.map-schematic-label { fill: var(--text-secondary); font-size: 12px; font-family: var(--font-sans); }
+.map-schematic-vehicle { fill: #ffffff; font-size: 9px; font-weight: 700; font-family: var(--font-sans); }
+
+.map-vehicle {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 9px;
+    background: var(--vehicle-color, #555);
+    color: #fff;
+    font: 700 10px/1.4 var(--font-sans);
+    white-space: nowrap;
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    transform: translate(-50%, -50%);
+}
+
+.map-vehicle-icon { background: none; border: none; }
+
+/* Clickable departure rows */
+.departure-row.is-clickable { cursor: pointer; }
+
+/* Home station picker */
+.btn-home {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.95rem;
+    padding: 2px 4px;
+    line-height: 1;
+}
+.btn-home.active { color: var(--accent); }
