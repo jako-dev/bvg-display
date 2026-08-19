@@ -1,8 +1,5 @@
 {
   "_readme": "Optional deployment defaults — see 'Preconfigured Stations' in README.md. Stations listed here are shown to any client that has not configured its own. Leave 'stations' empty to keep the default 'add a station' flow.",
   "lock": false,
-  "stations": [
-    { "id": "900120025", "name": "U Weberwiese", "walkTime": 8 },
-    { "id": "900120516", "name": "Bersarinplatz", "walkTime": 4 }
-  ]
+  "stations": []
 }
