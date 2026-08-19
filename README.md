@@ -153,6 +153,13 @@ or from `https://v6.bvg.transport.rest/locations?query=Alexanderplatz&stops=true
 > URL-encode the name: `+` means a space in a query string, so `S+U Alexanderplatz`
 > has to be written `S%2BU%20Alexanderplatz`.
 
+### Finding places
+
+The destination search covers stops, addresses and points of interest, but the
+POI index belongs to the transport operator and is thin outside well-known
+landmarks — *Brandenburger Tor* resolves, a particular market hall or restaurant
+usually does not. A street address always works, and is the reliable way in.
+
 ### Showing a line
 
 Type a line name into the map toolbar — `M10`, `U5`, `S41`. The lookup goes
@@ -171,7 +178,7 @@ on the map so you can see where you are relative to whatever is drawn.
 For a kiosk or an embedded view, pass it in the URL instead:
 
 ```
-?address=52.52054,13.45587|Mühsamstr.%2039&to=900100003&view=journey
+?address=52.52151,13.41127|Alexanderplatz&to=900120025&view=journey
 ```
 
 > Deliberately not part of the shipped `config.json`: this repo and its Pages
@@ -421,6 +428,11 @@ board.
 screen, only that line's vehicles are drawn — the whole city's traffic at once is
 noise. With nothing shown, everything passes, subject to the product filter in
 the map toolbar.
+
+`/radar` caps a response at 256 vehicles. A wide view over central Berlin hits
+that, and what comes back is then an arbitrary slice that differs poll to poll —
+so the toolbar says *Ausschnitt* when the cap is reached. Zooming in narrows the
+bounding box and gets you a complete picture of a smaller area.
 
 ### Map tiles
 

@@ -1128,6 +1128,12 @@ input.walk-time-input {
     padding: var(--space-3) var(--gutter);
     border-bottom: 1px solid var(--line);
     flex-wrap: wrap;
+
+    /* Leaflet gives its panes z-index 400 and its controls 800, all in this
+       same stacking context — without a context of its own the toolbar's
+       dropdown was painted underneath the map. */
+    position: relative;
+    z-index: 1100;
 }
 
 .map-title {

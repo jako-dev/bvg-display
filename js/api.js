@@ -356,7 +356,7 @@ const BvgApi = (() => {
             west: String(bbox.west),
             south: String(bbox.south),
             east: String(bbox.east),
-            results: String(opt.results || 128),
+            results: String(opt.results || 256),
             duration: String(opt.duration || 30),
             frames: String(opt.frames || 3),
             polylines: opt.polylines ? 'true' : 'false',
