@@ -531,6 +531,17 @@ input::placeholder { color: var(--text-3); }
     flex-shrink: 0;
 }
 
+/* Marks a destination that isn't a stop, so "Markthalle 9" doesn't read as
+   though it were a station. */
+.result-kind {
+    padding: 1px 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    font-size: 0.625rem;
+    color: var(--text-3);
+    white-space: nowrap;
+}
+
 /* ===== Saved stations ===== */
 .saved-stations {
     display: flex;
@@ -591,14 +602,58 @@ input.walk-time-input {
     word-break: break-word;
 }
 
-.map-line-select {
-    width: auto;
-    max-width: 260px;
+.map-line-search { width: 190px; flex-shrink: 0; }
+
+.map-line-search input {
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
 }
 
-.map-line-select:disabled { color: var(--text-3); }
+.line-result-direction {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.map-line-search .search-result-item { gap: var(--space-2); justify-content: flex-start; }
+.map-line-search .search-results { width: 280px; }
+
+.map-filters {
+    display: flex;
+    gap: var(--space-1);
+    transition: opacity var(--fast) var(--ease);
+}
+
+/* While a line or connection is shown, live vehicles follow that instead of
+   the product filter — so the chips are inert and shouldn't look active. */
+.map-filters.is-muted { opacity: 0.35; pointer-events: none; }
+
+/* Product toggles: the badge is the control. Off reads as drained rather than
+   hidden, so you can still see what you switched off. */
+.map-filter {
+    border: none;
+    cursor: pointer;
+    opacity: 1;
+    transition: opacity var(--fast) var(--ease), filter var(--fast) var(--ease);
+}
+
+.map-filter[aria-pressed="false"] {
+    opacity: 0.3;
+    filter: grayscale(1);
+}
+
+/* Permanent labels on the endpoints of a short route */
+.map-stop-tip.leaflet-tooltip {
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    color: var(--text-1);
+    font: var(--weight-medium) var(--text-xs)/1.4 var(--font-sans);
+    box-shadow: none;
+}
+
+.map-stop-tip.leaflet-tooltip-top::before { border-top-color: var(--line-strong); }
 
 .empty-hint {
     font-size: var(--text-sm);
@@ -1133,6 +1188,26 @@ input.walk-time-input {
 }
 
 .map-vehicle-icon { background: none; border: none; }
+
+/* Home marker: a standing landmark, so it reads differently from the route
+   dots and from the live vehicle chips. */
+.map-pin-icon { background: none; border: none; }
+
+.map-pin {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--surface-2);
+    box-shadow: 0 0 0 2px var(--warn), 0 2px 6px rgba(0, 0, 0, 0.4);
+    font-size: 13px;
+    line-height: 1;
+    transform: translate(-50%, -50%);
+}
+
+.map-schematic-pin { font-size: 16px; }
 
 /* Leaflet chrome, toned down to match the panel */
 .leaflet-container { background: var(--surface-0); font-family: var(--font-sans); }

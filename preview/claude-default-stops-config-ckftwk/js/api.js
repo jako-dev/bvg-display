@@ -102,53 +102,99 @@ const BvgApi = (() => {
      * @param {string} query - Search term
      * @returns {Promise<Array>} List of matching stops/stations
      */
-    async function searchStations(query) {
-        if (!query || query.trim().length < 2) return [];
+    /**
+     * Search the location index and normalise the three kinds it returns into
+     * one shape.
+     *
+     * Stops nest their coordinates under `location`; addresses and points of
+     * interest carry lat/lng at the top level, and name themselves with
+     * `address` and `name` respectively. Flattening that here keeps the
+     * difference out of the UI.
+     *
+     * @param {string} query
+     * @param {Object} [opt]
+     * @param {boolean} [opt.stops=true]
+     * @param {boolean} [opt.addresses=false]
+     * @param {boolean} [opt.poi=false]
+     * @param {number} [opt.results=8]
+     * @returns {Promise<Array<{kind: 'stop'|'poi'|'address', id: string, name: string,
+     *                          latitude: number, longitude: number, products?: Object}>>}
+     */
+    async function searchPlaces(query, opt = {}) {
+        const text = (query || '').trim();
+        if (text.length < 2) return [];
+
         const params = new URLSearchParams({
-            query: query.trim(),
-            results: '8',
-            stops: 'true',
-            addresses: 'false',
-            poi: 'false',
+            query: text,
+            results: String(opt.results || 8),
+            stops: opt.stops === false ? 'false' : 'true',
+            addresses: opt.addresses ? 'true' : 'false',
+            poi: opt.poi ? 'true' : 'false',
             pretty: 'false'
         });
+
         const data = await rateLimitedFetch(`${baseUrl}/locations?${params}`);
         if (!Array.isArray(data)) return [];
-        return data.filter(item => item.type === 'stop');
+
+        const places = [];
+        for (const item of data) {
+            if (!item) continue;
+
+            if (item.type === 'stop' && item.id) {
+                const loc = item.location || {};
+                places.push({
+                    kind: 'stop',
+                    id: String(item.id),
+                    name: item.name || '',
+                    latitude: loc.latitude,
+                    longitude: loc.longitude,
+                    products: item.products
+                });
+                continue;
+            }
+
+            if (item.type === 'location' && isFinite(item.latitude) && isFinite(item.longitude)) {
+                const name = item.name || item.address || '';
+                if (!name) continue;
+                places.push({
+                    kind: item.poi ? 'poi' : 'address',
+                    id: item.id ? String(item.id) : '',
+                    name,
+                    latitude: item.latitude,
+                    longitude: item.longitude
+                });
+            }
+        }
+        return places;
+    }
+
+    /** Stops only — what the departure board and the split panes can display. */
+    async function searchStations(query) {
+        const places = await searchPlaces(query, { stops: true });
+        return places
+            .filter(place => place.kind === 'stop')
+            .map(place => ({
+                type: 'stop',
+                id: place.id,
+                name: place.name,
+                location: { latitude: place.latitude, longitude: place.longitude },
+                products: place.products
+            }));
     }
 
     /**
-     * Search for street addresses (and points of interest) rather than stops —
-     * used to pin down a home address so a journey can start at the front door
-     * and include the walk to the platform.
-     * @param {string} query - e.g. 'Mühsamstr. 39, 10249 Berlin'
-     * @returns {Promise<Array<{address: string, latitude: number, longitude: number}>>}
+     * Addresses and points of interest — anywhere a journey can start or end
+     * that isn't a stop.
      */
     async function searchAddresses(query) {
         if (!query || query.trim().length < 3) return [];
-        const params = new URLSearchParams({
-            query: query.trim(),
-            results: '6',
-            stops: 'false',
-            addresses: 'true',
-            poi: 'true',
-            pretty: 'false'
-        });
-        const data = await rateLimitedFetch(`${baseUrl}/locations?${params}`);
-        if (!Array.isArray(data)) return [];
-
-        // Addresses come back as bare locations (lat/lng at the top level),
-        // unlike stops which nest them under `location`.
-        return data
-            .filter(item => item && item.type === 'location'
-                && isFinite(item.latitude) && isFinite(item.longitude))
-            .map(item => ({
-                address: item.address || item.name || '',
-                latitude: item.latitude,
-                longitude: item.longitude,
-                poi: !!item.poi
-            }))
-            .filter(item => item.address);
+        const places = await searchPlaces(query, { stops: false, addresses: true, poi: true, results: 6 });
+        return places.map(place => ({
+            address: place.name,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            poi: place.kind === 'poi'
+        }));
     }
 
     /**
@@ -271,6 +317,28 @@ const BvgApi = (() => {
     }
 
     /**
+     * Find the runs of a named line — "M10", "U5", "S41" — across the whole
+     * network, not just a map viewport. Each result is one run in one
+     * direction, which is what makes a line's route retrievable by name.
+     * @param {string} lineName
+     * @param {Object} [opt]
+     * @param {number} [opt.results=20]
+     * @returns {Promise<Object>} { trips: [...] }
+     */
+    async function searchTripsByLine(lineName, opt = {}) {
+        const params = new URLSearchParams({
+            lineName: String(lineName).trim(),
+            onlyCurrentlyRunning: 'true',
+            stopovers: 'false',
+            remarks: 'false',
+            pretty: 'false',
+            language: 'de'
+        });
+        if (opt.results) params.set('results', String(opt.results));
+        return rateLimitedFetch(`${baseUrl}/trips?${params}`);
+    }
+
+    /**
      * Find every vehicle currently moving inside a bounding box.
      * One request covers the whole visible area no matter how many vehicles
      * are in it, which is what makes a live map affordable under the rate limit.
@@ -342,12 +410,14 @@ const BvgApi = (() => {
     return {
         PRODUCTS,
         DEFAULT_PROVIDER,
+        searchPlaces,
         searchStations,
         searchAddresses,
         getDepartures,
         getStation,
         getJourneys,
         getTrip,
+        searchTripsByLine,
         getRadar,
         polylineToLatLngs,
         polylineStations,

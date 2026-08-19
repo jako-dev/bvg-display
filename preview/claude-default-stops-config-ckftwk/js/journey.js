@@ -221,8 +221,19 @@ const JourneyView = (() => {
     function toRoutes(journey) {
         const routes = [];
         for (const leg of journey.legs || []) {
-            const points = BvgApi.polylineToLatLngs(leg.polyline);
+            let points = BvgApi.polylineToLatLngs(leg.polyline);
+
+            // HAFAS often returns no shape for a walking leg. Drawing a
+            // straight dashed hop between its endpoints is not the pavement
+            // you'd actually walk, but it does show that the leg exists and
+            // where it goes — leaving it out makes the route look disconnected.
+            if (points.length < 2 && leg.walking) {
+                const from = coordsOf(leg.origin);
+                const to = coordsOf(leg.destination);
+                if (from && to) points = [from, to];
+            }
             if (points.length < 2) continue;
+
             routes.push({
                 points,
                 product: leg.walking ? 'walking' : ((leg.line && leg.line.product) || ''),
@@ -231,6 +242,13 @@ const JourneyView = (() => {
             });
         }
         return routes;
+    }
+
+    /** @returns {[number, number]|null} */
+    function coordsOf(place) {
+        const loc = (place && place.location) || place;
+        if (!loc || !isFinite(loc.latitude) || !isFinite(loc.longitude)) return null;
+        return [loc.latitude, loc.longitude];
     }
 
     /** Origin, destination and every transfer point, for map markers. */
