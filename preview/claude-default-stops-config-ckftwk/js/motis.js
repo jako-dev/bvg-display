@@ -80,8 +80,11 @@ const MotisApi = (() => {
      */
     const SEARCH_MIN_SPAN_LAT = 0.12;
     const SEARCH_MIN_SPAN_LON = 0.18;
-    const SEARCH_MAX_SPAN_LAT = 0.32;
-    const SEARCH_MAX_SPAN_LON = 0.55;   // together, comfortably a whole city
+    // The ceiling is regional rather than municipal: an interurban tram like
+    // RNV 5 runs Mannheim - Weinheim - Heidelberg, well past what a city-sized
+    // box holds, and anything outside the box is simply missing from the line.
+    const SEARCH_MAX_SPAN_LAT = 0.50;
+    const SEARCH_MAX_SPAN_LON = 0.80;
     const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
 
     /**
@@ -90,6 +93,9 @@ const MotisApi = (() => {
      * does not ask for anything else.
      */
     const SEGMENT_PRECISION = 5;
+
+    /** A one-character query matches a lot; only the closest few are useful. */
+    const MAX_LINE_RESULTS = 8;
 
     /**
      * @param {{fetchJson: function(string): Promise<Object>, baseUrl: string}} opt
@@ -363,6 +369,89 @@ const MotisApi = (() => {
     }
 
     /**
+     * How well a route's names answer what was typed.
+     *
+     * Exact beats prefix beats substring, so typing "5" still puts line 5 above
+     * RNV 5 and 105, while "rnv" finds every RNV line. The long name matches
+     * too but always ranks below the short one — it is a description, not a
+     * label, and matching it should never outrank the thing printed on the
+     * front of the vehicle.
+     *
+     * @returns {number} higher is better; -1 for no match
+     */
+    function matchScore(wanted, route) {
+        const short = normalise(route.shortName);
+        const long = normalise(route.longName);
+        if (short === wanted) return 4;
+        if (short.startsWith(wanted)) return 3;
+        if (short.includes(wanted)) return 2;
+        if (long.includes(wanted)) return 1;
+        return -1;
+    }
+
+    /**
+     * Split the pooled hops into as few continuous runs as possible.
+     *
+     * A line is not always one path. RNV 5 in Mannheim is a ring, and plenty of
+     * lines have a branch or a depot spur, so reducing the whole thing to its
+     * single longest walk drew a ring as a semicircle and a branch not at all.
+     * Every hop ends up in exactly one run here, so the drawn line is the whole
+     * line; the runs are as long as they can be so the map gets a handful of
+     * polylines rather than one per stop pair.
+     */
+    function chainEdges(edges) {
+        const unused = new Set(edges.keys());
+        const touching = new Map();
+        edges.forEach((edge, i) => {
+            for (const stop of [edge.from, edge.to]) {
+                if (!touching.has(stop)) touching.set(stop, []);
+                touching.get(stop).push(i);
+            }
+        });
+        const nextFrom = (stop) => (touching.get(stop) || []).find(i => unused.has(i));
+
+        const chains = [];
+        while (unused.size > 0) {
+            const seed = unused.values().next().value;
+            unused.delete(seed);
+            const chain = [edges[seed]];
+
+            // Grow forwards, then backwards, taking any hop that still needs a
+            // home and turning it to face the way we are walking.
+            for (let stop = chain[chain.length - 1].to; ;) {
+                const i = nextFrom(stop);
+                if (i === undefined) break;
+                unused.delete(i);
+                const edge = edges[i];
+                const step = edge.from === stop ? edge : { from: edge.to, to: edge.from, polyline: edge.polyline };
+                chain.push(step);
+                stop = step.to;
+            }
+            for (let stop = chain[0].from; ;) {
+                const i = nextFrom(stop);
+                if (i === undefined) break;
+                unused.delete(i);
+                const edge = edges[i];
+                const step = edge.to === stop ? edge : { from: edge.to, to: edge.from, polyline: edge.polyline };
+                chain.unshift(step);
+                stop = step.from;
+            }
+            chains.push(chain);
+        }
+        return chains;
+    }
+
+    /** Stops where the line ends rather than carries on. A ring has none. */
+    function terminiOf(edges) {
+        const degree = new Map();
+        for (const edge of edges) {
+            degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
+            degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
+        }
+        return [...degree.entries()].filter(([, n]) => n === 1).map(([stop]) => stop);
+    }
+
+    /**
      * The longest run through the pooled hops, end to end.
      *
      * A line's hops form a mostly path-shaped graph — a spine with the odd
@@ -457,29 +546,60 @@ const MotisApi = (() => {
         // "M10" should produce one M10, not one per stop sequence.
         const lines = new Map();
         for (const info of infos) {
-            const match = (info.transitRoutes || []).find(r =>
-                normalise(r.shortName) === wanted || normalise(r.longName) === wanted);
-            if (!match) continue;
-            const name = match.shortName || match.longName || query;
-            if (!lines.has(name)) lines.set(name, { name, match, infos: [] });
-            lines.get(name).infos.push(info);
+            let best = -1;
+            let bestRoute = null;
+            for (const route of info.transitRoutes || []) {
+                const score = matchScore(wanted, route);
+                if (score > best) { best = score; bestRoute = route; }
+            }
+            if (best < 0) continue;
+
+            const name = bestRoute.shortName || bestRoute.longName || query;
+            if (!lines.has(name)) lines.set(name, { name, match: bestRoute, score: best, infos: [] });
+            const line = lines.get(name);
+            line.infos.push(info);
+            if (best > line.score) { line.score = best; line.match = bestRoute; }
         }
 
-        for (const line of lines.values()) {
+        // Closest answer first, and a cap so a one-character query does not
+        // return every line in the region.
+        const ranked = [...lines.values()]
+            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'de', { numeric: true }))
+            .slice(0, MAX_LINE_RESULTS);
+
+        for (const line of ranked) {
             const product = productOf(line.infos[0].mode);
             const mode = line.infos[0].mode || '';
 
             // --- the line as a whole ---
             const edges = collectEdges(line.infos, polylines);
-            const { path, ends } = longestRun(edges);
-            const whole = assembleFromSegments(path, polylines, stops);
-            if (whole.points.length >= 2) {
-                const [a, b] = ends.map(i => (stops[i] && stops[i].name) || '');
+            const chains = chainEdges(edges);
+            const shapes = [];
+            const allStops = [];
+            for (const chain of chains) {
+                const run = assembleFromSegments(chain, polylines, stops);
+                if (run.points.length < 2) continue;
+                shapes.push(toFeatureCollection(run.points, run.stops));
+                allStops.push(...run.stops);
+            }
+
+            if (shapes.length > 0) {
+                const ends = terminiOf(edges).map(i => (stops[i] && stops[i].name) || '').filter(Boolean);
+                // A ring has no ends; its long name is the only description of
+                // it there is.
+                const direction = ends.length >= 2
+                    ? `${ends[0]} \u2194 ${ends[ends.length - 1]}`
+                    : (line.match.longName || 'Ringlinie');
+
                 const id = `${ROUTE_ID_PREFIX}line:${line.name}`;
-                const direction = [a, b].filter(Boolean).join(' \u2194 ');
                 routeCache.set(id, {
                     id, name: line.name, direction, product, mode,
-                    polyline: toFeatureCollection(whole.points, whole.stops)
+                    polyline: shapes[0],
+                    polylines: shapes,
+                    termini: terminiOf(edges)
+                        .map(i => stops[i])
+                        .filter(Boolean)
+                        .map(stop => ({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon }))
                 });
                 trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
             }
@@ -704,7 +824,11 @@ const MotisApi = (() => {
                     id: cached.id,
                     line: { name: cached.name, product: cached.product, mode: cached.mode },
                     direction: cached.direction,
-                    polyline: cached.polyline
+                    polyline: cached.polyline,
+                    // A line is not always one path — a ring, a branch and a
+                    // spur are all separate runs of the same line.
+                    polylines: cached.polylines || null,
+                    termini: cached.termini || null
                 } };
             }
             return { trip: {} };
