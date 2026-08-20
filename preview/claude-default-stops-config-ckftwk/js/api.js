@@ -6,9 +6,46 @@
 const BvgApi = (() => {
     'use strict';
 
+    /**
+     * The endpoints this app can talk to, and what each of them can actually do.
+     *
+     * All three speak the same request/response shape, so switching is a base-URL
+     * swap — but they are not the same backend underneath. BVG and VBB are HAFAS
+     * deployments and answer the whole surface. The DB one was migrated off
+     * HAFAS after Deutsche Bahn retired that endpoint, and its replacement has
+     * no equivalent for two of the calls this app makes:
+     *
+     *   radar      /radar            live vehicle positions in a bounding box
+     *   lineSearch /trips?lineName=  find a line anywhere in the network
+     *
+     * Those are declared per provider rather than discovered, so the UI can hide
+     * what a provider cannot do instead of firing a request that 404s.
+     *
+     * `fallbacks` is the order to offer when the current endpoint is unreachable:
+     * a provider covering the same area first.
+     */
     const PROVIDERS = {
-        'v6.bvg.transport.rest': 'BVG (Berlin)',
-        'v6.vbb.transport.rest': 'VBB (Berlin + Brandenburg)'
+        'v6.bvg.transport.rest': {
+            label: 'BVG (Berlin)',
+            area: 'Berlin',
+            radar: true,
+            lineSearch: true,
+            fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest']
+        },
+        'v6.vbb.transport.rest': {
+            label: 'VBB (Berlin + Brandenburg)',
+            area: 'Berlin und Brandenburg',
+            radar: true,
+            lineSearch: true,
+            fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest']
+        },
+        'v6.db.transport.rest': {
+            label: 'DB (deutschlandweit)',
+            area: 'Deutschland',
+            radar: false,
+            lineSearch: false,
+            fallbacks: ['v6.vbb.transport.rest']
+        }
     };
 
     // Transport product keys understood by the transport.rest API.
@@ -47,21 +84,51 @@ const BvgApi = (() => {
 
     /**
      * Get available providers
-     * @returns {Object} host -> label mapping
+     * @returns {Object} host -> {label, area, radar, lineSearch, fallbacks}
      */
     function getProviders() {
         return { ...PROVIDERS };
     }
 
     /**
-     * The other endpoint. BVG and VBB are separate deployments that both cover
-     * Berlin, so when one is down the other usually is not.
+     * What the given provider (default: the current one) supports.
+     * Unknown hosts report no optional capabilities rather than throwing, so a
+     * stale saved setting degrades instead of breaking the page.
+     * @param {string} [host]
+     * @returns {{label: string, area: string, radar: boolean, lineSearch: boolean}}
+     */
+    function getCapabilities(host) {
+        const entry = PROVIDERS[host || getProvider()];
+        if (!entry) return { label: '', area: '', radar: false, lineSearch: false };
+        return {
+            label: entry.label,
+            area: entry.area,
+            radar: !!entry.radar,
+            lineSearch: !!entry.lineSearch
+        };
+    }
+
+    /**
+     * Where to send someone when the current endpoint is unreachable. These are
+     * separate deployments, so one being down rarely means the next one is.
      * @returns {{host: string, label: string}|null}
      */
     function getAlternateProvider() {
-        const current = getProvider();
-        const other = Object.keys(PROVIDERS).find(host => host !== current);
-        return other ? { host: other, label: PROVIDERS[other] } : null;
+        const current = PROVIDERS[getProvider()];
+        const host = (current && current.fallbacks || []).find(h => PROVIDERS[h]);
+        return host ? { host, label: PROVIDERS[host].label } : null;
+    }
+
+    /**
+     * Refuse a call the current backend has no endpoint for, with an error the
+     * UI can tell apart from a network failure.
+     * @param {'radar'|'lineSearch'} capability
+     */
+    function assertSupported(capability) {
+        if (getCapabilities()[capability]) return;
+        const error = new Error(`${getCapabilities().label} liefert diese Daten nicht.`);
+        error.unsupported = capability;
+        throw error;
     }
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -383,6 +450,7 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { trips: [...] }
      */
     async function searchTripsByLine(lineName, opt = {}) {
+        assertSupported('lineSearch');
         const params = new URLSearchParams({
             lineName: String(lineName).trim(),
             onlyCurrentlyRunning: 'true',
@@ -408,6 +476,7 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { movements: [...] }
      */
     async function getRadar(bbox, opt = {}) {
+        assertSupported('radar');
         const params = new URLSearchParams({
             north: String(bbox.north),
             west: String(bbox.west),
@@ -467,6 +536,7 @@ const BvgApi = (() => {
     return {
         PRODUCTS,
         DEFAULT_PROVIDER,
+        getCapabilities,
         searchPlaces,
         searchStations,
         searchAddresses,

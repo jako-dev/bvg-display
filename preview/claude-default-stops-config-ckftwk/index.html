@@ -158,7 +158,9 @@
                     <select id="api-provider">
                         <option value="v6.bvg.transport.rest">BVG (Berlin)</option>
                         <option value="v6.vbb.transport.rest">VBB (Berlin + Brandenburg)</option>
+                        <option value="v6.db.transport.rest">DB (deutschlandweit)</option>
                     </select>
+                    <p class="setting-hint" id="provider-hint"></p>
                 </div>
 
                 <div class="setting-group">
@@ -299,7 +301,7 @@
             <!-- Map View -->
             <div id="map-view" class="map-view hidden">
                 <div class="map-toolbar">
-                    <span class="map-title" id="map-title">Karte</span>
+                    <span class="map-title is-default" id="map-title">Karte</span>
                     <div class="search-wrapper map-line-search">
                         <input type="text" id="map-line-input" placeholder="Linie anzeigen, z.B. M10"
                                autocomplete="off" aria-label="Linie anzeigen">
@@ -307,7 +309,8 @@
                     </div>
                     <label class="toggle-label map-live">
                         <input type="checkbox" id="map-live-toggle" checked>
-                        <span>Live-Fahrzeuge</span>
+                        <span class="label-long">Live-Fahrzeuge</span>
+                        <span class="label-short" aria-hidden="true">Live</span>
                     </label>
                     <div class="map-filters" id="map-filters" role="group" aria-label="Verkehrsmittel auf der Karte">
                         <button class="map-filter badge badge-suburban" data-product="suburban" title="S-Bahn" aria-pressed="true">S</button>
@@ -318,8 +321,14 @@
                         <button class="map-filter badge badge-express" data-product="express" title="IC/ICE" aria-pressed="true">IC</button>
                         <button class="map-filter badge badge-regional" data-product="regional" title="Regional" aria-pressed="true">RE</button>
                     </div>
-                    <button id="map-fit" class="btn-ghost">Ansicht anpassen</button>
-                    <button id="map-clear" class="btn-ghost">Route l&ouml;schen</button>
+                    <button id="map-fit" class="btn-ghost" title="Ansicht anpassen" aria-label="Ansicht anpassen">
+                        <span class="label-long">Ansicht anpassen</span>
+                        <span class="label-short" aria-hidden="true">&#8690;</span>
+                    </button>
+                    <button id="map-clear" class="btn-ghost" title="Route l&ouml;schen" aria-label="Route l&ouml;schen">
+                        <span class="label-long">Route l&ouml;schen</span>
+                        <span class="label-short" aria-hidden="true">&#10005;</span>
+                    </button>
                     <span class="map-status" id="map-status"></span>
                 </div>
                 <div id="map-container" class="map-container"></div>
