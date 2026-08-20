@@ -480,13 +480,24 @@ app renders. Two things there are worth knowing:
   which is in force.
 - MOTIS holds one line as **several routes** — one per distinct stop sequence,
   so each direction and every short working is its own entry. Drawing any one
-  of them draws part of the line. The search pools their segments, deduplicates
-  the shared hops, and walks the result end to end, so the first hit for "M10"
-  is the line from terminus to terminus; the individual routes follow under a
-  divider, since a branch or a short working is a real thing to want to see.
-  The searched box has a floor of roughly 13 × 13 km for the same reason —
-  sized to a line rather than to the viewport, so searching from a zoomed-in
-  street view does not return a stub.
+  of them draws part of the line. The search pools their segments and
+  deduplicates the shared hops, so the first hit for "M10" is the whole line;
+  the individual routes follow under a divider, since a branch or a short
+  working is a real thing to want to see.
+- A line is **not always one path**. RNV 5 in Mannheim is a ring, and plenty of
+  lines have a branch or a spur, so the pooled hops are chained into as few
+  continuous runs as possible and every one of them is drawn — reducing a line
+  to its single longest walk drew a ring as a semicircle. Stops that end the
+  line (degree one in the pooled hops) are labelled permanently; a ring has
+  none and gets none.
+- The searched box runs from roughly 13 × 13 km up to 55 × 60 km: sized to a
+  line rather than to the viewport at the bottom end, so a zoomed-in street
+  view does not return a stub, and regional rather than municipal at the top,
+  since an interurban tram runs well past what a city-sized box holds.
+- Matching is **ranked substring**: exact short name, then prefix, then
+  substring, and the long name last. So "5" still puts line 5 above RNV 5,
+  "rnv" finds every RNV line, and "ringlinie" finds one by its description.
+  Capped at the closest eight lines.
 
 Rather than let unsupported calls fail, each provider declares what it supports
 in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an

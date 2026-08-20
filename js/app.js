@@ -2119,24 +2119,56 @@
             if (token !== requestToken || !shownRoute || shownRoute.tripId !== tripId) return;
 
             const trip = data.trip || {};
-            const points = TransitApi.polylineToLatLngs(trip.polyline);
-            if (points.length < 2) {
+            const product = (trip.line && trip.line.product) || '';
+            const lineName = (trip.line && trip.line.name) || '';
+
+            // A whole line can be several separate runs — a ring closes on
+            // itself, a branch leaves the trunk — so it arrives as a list of
+            // shapes. A single trip is just the one.
+            const shapes = (Array.isArray(trip.polylines) && trip.polylines.length)
+                ? trip.polylines
+                : [trip.polyline];
+
+            const routes = shapes
+                .map(shape => ({ points: TransitApi.polylineToLatLngs(shape), product, label: lineName }))
+                .filter(route => route.points.length >= 2);
+
+            if (routes.length === 0) {
                 setMapStatus('Für diese Fahrt liegt keine Route vor.', true);
                 return;
             }
 
-            const stations = TransitApi.polylineStations(trip.polyline);
-            setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
+            // Shared stops appear in every run that touches them.
+            const stations = [];
+            const seenStops = new Set();
+            for (const shape of shapes) {
+                for (const station of TransitApi.polylineStations(shape)) {
+                    const key = station.id || `${station.lat},${station.lng}`;
+                    if (seenStops.has(key)) continue;
+                    seenStops.add(key);
+                    stations.push(station);
+                }
+            }
+
+            setMapTitle(label || `${lineName} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
-            setMapFocus([(trip.line && trip.line.name) || '']);
-            drawRoutes([{
-                points,
-                product: (trip.line && trip.line.product) || '',
-                label: (trip.line && trip.line.name) || ''
-            }]);
+            setMapFocus([lineName]);
+            drawRoutes(routes);
+
+            // Which stops are ends is a property of the line, not of the order
+            // the runs happen to be in — and a ring has none at all.
+            // An empty list means "worked it out, there are none" — a ring —
+             // which is different from a source that does not report termini at
+             // all. Only the latter falls back to the ends of the drawn path.
+            const knowsTermini = Array.isArray(trip.termini);
+            const ends = new Set((trip.termini || []).map(t => t.id || `${t.lat},${t.lon}`));
+            const isEnd = (station, index) => knowsTermini
+                ? ends.has(station.id || `${station.lat},${station.lng}`)
+                : (routes.length === 1 && (index === 0 || index === stations.length - 1));
+
             TransitMap.setStops(stations.map((st, i) => ({
                 lat: st.lat, lng: st.lng, name: st.name,
-                kind: i === 0 ? 'origin' : (i === stations.length - 1 ? 'destination' : 'stop')
+                kind: isEnd(st, i) ? 'destination' : 'stop'
             })));
             TransitMap.fit();
         } catch (e) {
