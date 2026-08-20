@@ -2470,10 +2470,7 @@
                     id: trip.id,
                     name: line.name,
                     product: line.product || '',
-                    direction,
-                    // Backends that only know about single runs return no kind;
-                    // each of their results is one direction of one line.
-                    kind: trip.kind || 'variant'
+                    direction
                 });
             }
 
@@ -2483,18 +2480,7 @@
                 return;
             }
 
-            // The line end to end is what someone typing "M10" is usually
-            // after; its individual routes — a short working, a branch — are
-            // worth having, but below and clearly separated.
-            const whole = entries.filter(e => e.kind === 'line');
-            const variants = entries.filter(e => e.kind !== 'line');
-
-            dom.mapLineResults.innerHTML = [
-                ...whole.map(e => lineResultHtml(e, true)),
-                whole.length && variants.length
-                    ? '<div class="search-result-divider">Einzelne Routen</div>' : '',
-                ...variants.map(e => lineResultHtml(e, false))
-            ].filter(Boolean).join('');
+            dom.mapLineResults.innerHTML = entries.map(lineResultHtml).join('');
         } catch (e) {
             console.error('Line search failed:', e);
             dom.mapLineResults.innerHTML = `<div class="search-result-item">Fehler: ${escapeHtml(e.message)}</div>`;
@@ -2502,18 +2488,20 @@
     }
 
     /**
-     * One row of the line dropdown. The whole-line row is marked so it reads as
-     * the headline answer rather than as the first of a list of near-identical
-     * entries.
+     * One row of the line dropdown — one line, drawn end to end.
+     *
+     * Individual stop sequences used to be listed underneath, on the grounds
+     * that a branch or a short working is a real thing to look at. In practice
+     * a line has a dozen of them, they are all called the same, and telling
+     * them apart from a terminus name is impossible. So: one line, one row.
      */
-    function lineResultHtml(entry, isWholeLine) {
-        const label = `${entry.name} ${isWholeLine ? '·' : '→'} ${entry.direction}`.trim();
+    function lineResultHtml(entry) {
+        const label = `${entry.name} · ${entry.direction}`.trim();
         return `
-                <div class="search-result-item${isWholeLine ? ' is-whole-line' : ''}"
-                     data-trip-id="${escapeHtml(entry.id)}" data-label="${escapeHtml(label)}">
+                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
+                     data-label="${escapeHtml(label)}">
                     <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
                     <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
-                    ${isWholeLine ? '<span class="line-result-tag">ganze Linie</span>' : ''}
                 </div>
             `;
     }

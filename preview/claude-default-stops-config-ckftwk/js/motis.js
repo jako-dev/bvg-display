@@ -441,6 +441,51 @@ const MotisApi = (() => {
         return chains;
     }
 
+    /**
+     * The hops that make up the line proper, dropping anything not joined to it.
+     *
+     * Pooling by route id already keeps a different operator's identically
+     * named line out, but a route's own data can still carry a stray fragment —
+     * a depot spur recorded as its own pattern, a corridor left over from an
+     * old routing. Drawn, those appear as a piece of line floating somewhere
+     * the tram does not go. A line is one connected thing, so only the largest
+     * connected group of hops is kept.
+     */
+    function connectedCore(edges) {
+        if (edges.length === 0) return edges;
+
+        // Union-find over the stops the hops touch.
+        const parent = new Map();
+        const find = (x) => {
+            while (parent.get(x) !== x) {
+                parent.set(x, parent.get(parent.get(x)));
+                x = parent.get(x);
+            }
+            return x;
+        };
+        for (const edge of edges) {
+            for (const stop of [edge.from, edge.to]) if (!parent.has(stop)) parent.set(stop, stop);
+        }
+        for (const edge of edges) {
+            const a = find(edge.from), b = find(edge.to);
+            if (a !== b) parent.set(a, b);
+        }
+
+        const sizes = new Map();
+        for (const edge of edges) {
+            const root = find(edge.from);
+            sizes.set(root, (sizes.get(root) || 0) + 1);
+        }
+        let biggest = null, most = -1;
+        for (const [root, size] of sizes) if (size > most) { most = size; biggest = root; }
+
+        const core = edges.filter(edge => find(edge.from) === biggest);
+        if (core.length !== edges.length) {
+            console.info(`Line: ignored ${edges.length - core.length} hop(s) not connected to it.`);
+        }
+        return core;
+    }
+
     /** Stops where the line ends rather than carries on. A ring has none. */
     function terminiOf(edges) {
         const degree = new Map();
@@ -449,58 +494,6 @@ const MotisApi = (() => {
             degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
         }
         return [...degree.entries()].filter(([, n]) => n === 1).map(([stop]) => stop);
-    }
-
-    /**
-     * The longest run through the pooled hops, end to end.
-     *
-     * A line's hops form a mostly path-shaped graph — a spine with the odd
-     * branch where a short working peels off. The two ends of the longest walk
-     * through it are the termini, and that walk is the route to draw. Found by
-     * the standard two-pass search: the farthest stop from anywhere is one end,
-     * and the farthest stop from *that* is the other.
-     */
-    function longestRun(edges) {
-        if (edges.length === 0) return { path: [], ends: [] };
-
-        const neighbours = new Map();
-        for (const edge of edges) {
-            if (!neighbours.has(edge.from)) neighbours.set(edge.from, []);
-            if (!neighbours.has(edge.to)) neighbours.set(edge.to, []);
-            neighbours.get(edge.from).push({ stop: edge.to, edge });
-            neighbours.get(edge.to).push({ stop: edge.from, edge });
-        }
-
-        // Farthest stop from `origin`, plus how to get there. Hop count rather
-        // than distance: a line's hops are similar lengths, and it keeps this
-        // linear.
-        const walk = (origin) => {
-            const previous = new Map([[origin, null]]);
-            const queue = [origin];
-            let last = origin;
-            for (let i = 0; i < queue.length; i++) {
-                const stop = queue[i];
-                last = stop;
-                for (const step of neighbours.get(stop) || []) {
-                    if (previous.has(step.stop)) continue;
-                    previous.set(step.stop, { stop, edge: step.edge });
-                    queue.push(step.stop);
-                }
-            }
-            return { last, previous };
-        };
-
-        const first = walk(edges[0].from);
-        const second = walk(first.last);
-
-        const path = [];
-        for (let stop = second.last; ;) {
-            const step = second.previous.get(stop);
-            if (!step) break;
-            path.unshift({ from: step.stop, to: stop, polyline: step.edge.polyline });
-            stop = step.stop;
-        }
-        return { path, ends: [first.last, second.last] };
     }
 
     /**
@@ -554,9 +547,18 @@ const MotisApi = (() => {
             }
             if (best < 0) continue;
 
-            const name = bestRoute.shortName || bestRoute.longName || query;
-            if (!lines.has(name)) lines.set(name, { name, match: bestRoute, score: best, infos: [] });
-            const line = lines.get(name);
+            // Grouped by the route's own id rather than by the name printed on
+            // it. Two operators can both run something called M10, and pooling
+            // their segments would draw one line's arms onto the other.
+            const key = bestRoute.id || bestRoute.shortName || bestRoute.longName || query;
+            if (!lines.has(key)) {
+                lines.set(key, {
+                    key,
+                    name: bestRoute.shortName || bestRoute.longName || query,
+                    match: bestRoute, score: best, infos: []
+                });
+            }
+            const line = lines.get(key);
             line.infos.push(info);
             if (best > line.score) { line.score = best; line.match = bestRoute; }
         }
@@ -572,8 +574,9 @@ const MotisApi = (() => {
             const mode = line.infos[0].mode || '';
 
             // --- the line as a whole ---
-            const edges = collectEdges(line.infos, polylines);
+            const edges = connectedCore(collectEdges(line.infos, polylines));
             const chains = chainEdges(edges);
+
             const shapes = [];
             const allStops = [];
             for (const chain of chains) {
@@ -591,7 +594,10 @@ const MotisApi = (() => {
                     ? `${ends[0]} \u2194 ${ends[ends.length - 1]}`
                     : (line.match.longName || 'Ringlinie');
 
-                const id = `${ROUTE_ID_PREFIX}line:${line.name}`;
+                // Keyed by the route's id, not its name: two operators can
+                // both run an "M10", and keying by name made the second one
+                // overwrite the first, so picking one drew the other.
+                const id = `${ROUTE_ID_PREFIX}line:${line.key}`;
                 routeCache.set(id, {
                     id, name: line.name, direction, product, mode,
                     polyline: shapes[0],
@@ -604,29 +610,6 @@ const MotisApi = (() => {
                 trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
             }
 
-            // --- and each route it is made of ---
-            const seen = new Set();
-            for (let i = 0; i < line.infos.length; i++) {
-                const info = line.infos[i];
-                const assembled = assembleRoute(info, polylines, stops);
-                if (assembled.points.length < 2) continue;
-
-                const last = assembled.stops[assembled.stops.length - 1];
-                const variantDirection = (last && last.name) || line.match.longName || '';
-                if (seen.has(variantDirection)) continue;
-                seen.add(variantDirection);
-
-                const id = `${ROUTE_ID_PREFIX}${line.name}:${i}`;
-                routeCache.set(id, {
-                    id, name: line.name, direction: variantDirection, product, mode,
-                    polyline: toFeatureCollection(assembled.points, assembled.stops)
-                });
-                trips.push({
-                    id, line: { name: line.name, product },
-                    direction: variantDirection, kind: 'variant'
-                });
-                if (opt.results && trips.length >= opt.results) break;
-            }
         }
 
         return { trips };
