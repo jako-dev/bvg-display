@@ -1403,6 +1403,87 @@ body.kiosk-mode .display-header:hover .view-switch {
     .journey-arrow { display: none; }
 }
 
+/* =============================================================================
+   Compact mode — embedded in a short box
+
+   The app's usual home is a wall display. Inside a Home Assistant card it gets
+   a fixed, short viewport (a 10-row card is ~630px tall) on a phone-width
+   column, and the full-size chrome eats a third of it before a single
+   departure is drawn.
+
+   Keyed on viewport HEIGHT rather than width: an iPhone in landscape inside a
+   card is 836x632 — wide, but just as short as portrait, and it is the height
+   that decides how many rows fit.
+   ========================================================================== */
+@media (max-height: 760px) {
+    /* One header row instead of three: title, switch, settings. */
+    .display-header {
+        flex-wrap: nowrap;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+    }
+
+    .station-name { font-size: var(--text-md); }
+
+    /* The phone already shows a clock, and the app's own is to the pixel the
+       most expensive thing in the header. */
+    .clock { display: none; }
+
+    /* Fullscreen is meaningless inside an iframe. */
+    #kiosk-btn { display: none; }
+
+    .view-switch { order: 0; width: auto; margin-left: auto; }
+    .view-btn { flex: 0 0 auto; padding: var(--space-1) var(--space-2); }
+    .view-btn span { display: none; }
+
+    .btn-icon { width: 30px; height: 30px; }
+
+    /* "Letzte Aktualisierung" and the data source are reference information,
+       not something you read off a glanceable board. */
+    .display-footer { display: none; }
+
+    /* Tighter rows: the point of the card is how many departures fit. */
+    .departure-row { min-height: 44px; }
+    .col-departure { font-size: var(--text-md); }
+    .col-destination { font-size: var(--text-base); }
+    .board-header { padding-top: var(--space-1); padding-bottom: var(--space-1); }
+
+    .split-pane-header { padding: var(--space-2) var(--space-3); font-size: var(--text-base); }
+    .station-tabs { padding: var(--space-1) var(--space-3); }
+    .alerts-banner { padding: var(--space-1) var(--space-3); }
+
+    /* Journey: the controls were taking the whole card and leaving no room
+       for the connections they produce. */
+    .journey-controls { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
+    .journey-results { padding: var(--space-2) var(--space-3) var(--space-4); gap: var(--space-2); }
+    .journey-meta-row { padding: 0 var(--space-3) var(--space-2); }
+    .journey-card { padding: var(--space-3); }
+    .map-toolbar { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
+}
+
+/* Narrow *and* short — a phone-sized card, the tightest case there is. */
+@media (max-height: 760px) and (max-width: 620px) {
+    /* At this width the title only ever truncates to "Verbindun…" or
+       "BVG Abfa…", while the active view is already obvious from the switch
+       and each view labels its own content. The one exception is the single
+       board, where the title IS the station name and carries real meaning. */
+    body:not([data-view="single"]) .station-name { display: none; }
+
+    /* Two panes stacked in a 630px box: the repeated column headers cost a
+       row of departures each, and the layout is self-evident without them. */
+    .split-pane .board-header { display: none; }
+
+    /* Keep the destination field, the star and the button on one line rather
+       than letting the star orphan onto a row of its own. */
+    .journey-controls { flex-direction: row; flex-wrap: wrap; align-items: flex-end; }
+    .journey-endpoint { flex: 1 1 100%; min-width: 0; }
+    .journey-endpoint:last-of-type { flex: 1 1 auto; }
+    .journey-fav { flex: 0 0 auto; }
+    .journey-controls .btn-primary { flex: 0 0 auto; }
+
+    .journey-walk-note { margin-left: 0; }
+}
+
 /* ===== Reduced motion ===== */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {

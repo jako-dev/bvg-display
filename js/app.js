@@ -1333,6 +1333,10 @@
     // ===== View Mode =====
     function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
+        // Exposed for CSS: some chrome is redundant in some views and only
+        // worth hiding there (the app title means nothing in split view,
+        // where each pane is already labelled with its station).
+        document.body.dataset.view = mode;
         dom.viewSingle.classList.toggle('active', mode === 'single');
         dom.viewSplit.classList.toggle('active', mode === 'split');
         dom.viewJourney.classList.toggle('active', mode === 'journey');
@@ -1529,7 +1533,11 @@
     function renderJourneyControls() {
         const options = [];
         if (state.homeAddress) {
-            options.push(`<option value="${HOME_ADDRESS_VALUE}">🏠 Zuhause · ${escapeHtml(state.homeAddress.address)}</option>`);
+            // The label is often already "Zuhause" (a coordinate saved under
+            // that name), and "Zuhause · Zuhause" reads like a bug.
+            const addr = state.homeAddress.address || '';
+            const label = /^zuhause\b/i.test(addr) ? addr : `Zuhause · ${addr}`;
+            options.push(`<option value="${HOME_ADDRESS_VALUE}">🏠 ${escapeHtml(label)}</option>`);
         }
         for (const station of state.stations) {
             options.push(`<option value="${escapeHtml(station.id)}">${escapeHtml(station.name)}</option>`);
