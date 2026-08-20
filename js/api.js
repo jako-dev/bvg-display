@@ -30,9 +30,11 @@ const BvgApi = (() => {
      * covers addresses and points of interest, making the Photon fallback
      * unnecessary while it is selected.
      *
-     * `radarIntervalMs` is per provider because the polling that is fine
-     * against a commercial-scale endpoint is not fine against donated
-     * infrastructure — Transitous asks to be contacted before heavy use.
+     * `radarIntervalMs` stays per provider so one source can be treated more
+     * gently than the default without changing it for the rest. Transitous
+     * pins its own value rather than inheriting, because its usage policy is
+     * the reason for it — a later change to the default should not quietly
+     * speed it up.
      */
     const PROVIDERS = {
         'v6.bvg.transport.rest': {
@@ -41,7 +43,6 @@ const BvgApi = (() => {
             dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            radarIntervalMs: 10000,
             fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.vbb.transport.rest': {
@@ -50,7 +51,6 @@ const BvgApi = (() => {
             dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            radarIntervalMs: 10000,
             fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.db.transport.rest': {
@@ -85,7 +85,7 @@ const BvgApi = (() => {
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
     const SERVER_ERROR_RETRIES = 1;
-    const DEFAULT_RADAR_INTERVAL_MS = 10000;
+    const DEFAULT_RADAR_INTERVAL_MS = 30000;
     const RETRY_DELAY_MS = 1500;
 
     let baseUrl = 'https://' + DEFAULT_PROVIDER;

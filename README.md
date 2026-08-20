@@ -427,12 +427,15 @@ Uses the public [transport.rest](https://transport.rest/) APIs:
 Uses the public [transport.rest](https://transport.rest/) endpoints and
 [Transitous](https://transitous.org/):
 
-| Endpoint | Coverage | Live vehicles | Search by line | Poll |
-|----------|----------|---------------|----------------|------|
-| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes | 10 s |
-| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes | 10 s |
-| `v6.db.transport.rest` | Germany (DB) | no | no | — |
-| `api.transitous.org` | Germany and neighbours | yes | no | 30 s |
+| Endpoint | Coverage | Live vehicles | Search by line |
+|----------|----------|---------------|----------------|
+| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
+| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
+| `v6.db.transport.rest` | Germany (DB) | no | no |
+| `api.transitous.org` | Germany and neighbours | yes | no |
+
+Live vehicles poll every 30 seconds on every source. `radarIntervalMs` in
+`PROVIDERS` can slow an individual one further; nothing polls faster.
 
 - No API key required, no registration
 - CORS enabled (browser-friendly)
@@ -483,8 +486,9 @@ part, and one it cannot meet for you:
 - **Attribution.** A link to `https://transitous.org/sources/` is shown in the
   footer whenever Transitous is the selected source — including inside a short
   embedded card, where the rest of the footer is hidden.
-- **Polling.** Live vehicles poll every 30 s rather than the 10 s used against
-  transport.rest. The policy asks you to get in touch before making many
+- **Polling.** Live vehicles poll every 30 s, and Transitous pins that value
+  rather than inheriting the default, so raising the default later will not
+  quietly speed it up. The policy asks you to get in touch before making many
   requests; if you run this on a wall display all day, do that.
 - **Contact information.** A browser app cannot set a `User-Agent`, so the
   policy accepts the `Referer` header instead — on the condition that the site

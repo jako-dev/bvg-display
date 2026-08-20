@@ -13,7 +13,7 @@
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
-    const RADAR_INTERVAL_MS = 10000; // Live vehicle poll — one request per tick
+    const RADAR_INTERVAL_MS = 30000; // Live vehicle poll — one request per tick
     // The API's own maximum. Anything lower and a busy viewport comes back as
     // an arbitrary subset that differs on every poll — which looked like
     // vehicles randomly appearing and vanishing, and like a journey's later
@@ -2301,9 +2301,10 @@
     }
 
     /**
-     * The poll rate belongs to the provider, not to the app: 10s against a
-     * transport.rest endpoint is ordinary, while Transitous is donated
-     * infrastructure that asks to be treated gently, so it polls at 30s.
+     * Live vehicles poll every 30s on every source. The rate is still read from
+     * the provider so one can be slowed further than the default, but nothing
+     * is polled faster than this — a wall display left running all day is a lot
+     * of requests against endpoints that are free to use.
      */
     function startRadarTimer() {
         stopRadarTimer();
