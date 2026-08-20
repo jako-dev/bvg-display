@@ -1361,7 +1361,7 @@
     }
 
     function updateDataSourceLabel() {
-        dom.dataSource.textContent = `Daten: ${BvgApi.getCapabilities().label || 'BVG / VBB'}`;
+        dom.dataSource.textContent = `Daten: ${BvgApi.getCapabilities().label || 'unbekannte Quelle'}`;
     }
 
     /**

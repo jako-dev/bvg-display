@@ -429,10 +429,16 @@ Uses the public [transport.rest](https://transport.rest/) endpoints and
 
 | Endpoint | Coverage | Live vehicles | Search by line |
 |----------|----------|---------------|----------------|
+| `api.transitous.org` **(default)** | Germany and neighbours | yes | no |
+| `v6.db.transport.rest` | Germany (DB) | no | no |
 | `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
 | `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
-| `v6.db.transport.rest` | Germany (DB) | no | no |
-| `api.transitous.org` | Germany and neighbours | yes | no |
+
+Transitous is the default because a client that has never been configured has
+no way to say where it is, and a Berlin-only source is wrong everywhere else.
+A browser that has already picked a source keeps its choice — the saved setting
+is restored over the default. Berlin users who want line search should select
+BVG or VBB.
 
 Live vehicles poll every 30 seconds on every source. `radarIntervalMs` in
 `PROVIDERS` can slow an individual one further; nothing polls faster.

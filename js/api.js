@@ -81,7 +81,10 @@ const BvgApi = (() => {
     // Shared with the UI so filters, badges and query params can't drift apart.
     const PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
 
-    const DEFAULT_PROVIDER = 'v6.bvg.transport.rest';
+    // Nationwide by default: a fresh client has no way to say where it is, and
+     // a Berlin-only source is wrong everywhere else. A browser that has already
+     // chosen keeps its choice — loadState() restores it over this.
+     const DEFAULT_PROVIDER = 'api.transitous.org';
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
     const SERVER_ERROR_RETRIES = 1;
@@ -101,12 +104,24 @@ const BvgApi = (() => {
     function setProvider(host) {
         if (PROVIDERS[host]) {
             baseUrl = 'https://' + host;
-            if (isMotis()) {
-                // The adapter borrows this module's fetcher so rate limiting,
-                // the 5xx retry and the outage diagnostics apply there too.
-                MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
-            }
+            syncDialect();
         }
+    }
+
+    /**
+     * Point the MOTIS adapter at the current host.
+     *
+     * Called on every provider change *and* once at load, because the default
+     * provider is applied by initialising `baseUrl` rather than by going
+     * through setProvider() — a client that never changes the setting would
+     * otherwise leave the adapter unconfigured.
+     *
+     * The adapter borrows this module's fetcher, so rate limiting, the 5xx
+     * retry and the outage diagnostics apply there too.
+     */
+    function syncDialect() {
+        if (!isMotis()) return;
+        MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
     }
 
     /** Is the selected endpoint a MOTIS instance rather than a transport.rest one? */
@@ -606,6 +621,8 @@ const BvgApi = (() => {
         }
         return stations;
     }
+
+    syncDialect();
 
     return {
         PRODUCTS,
