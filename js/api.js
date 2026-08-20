@@ -23,28 +23,57 @@ const BvgApi = (() => {
      *
      * `fallbacks` is the order to offer when the current endpoint is unreachable:
      * a provider covering the same area first.
+     *
+     * `dialect` picks the request/response vocabulary. Transitous is a MOTIS
+     * instance rather than a transport.rest one, so it is translated in
+     * js/motis.js; `geocoder: 'builtin'` says its own place index already
+     * covers addresses and points of interest, making the Photon fallback
+     * unnecessary while it is selected.
+     *
+     * `radarIntervalMs` is per provider because the polling that is fine
+     * against a commercial-scale endpoint is not fine against donated
+     * infrastructure — Transitous asks to be contacted before heavy use.
      */
     const PROVIDERS = {
         'v6.bvg.transport.rest': {
             label: 'BVG (Berlin)',
             area: 'Berlin',
+            dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest']
+            radarIntervalMs: 10000,
+            fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.vbb.transport.rest': {
             label: 'VBB (Berlin + Brandenburg)',
             area: 'Berlin und Brandenburg',
+            dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest']
+            radarIntervalMs: 10000,
+            fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.db.transport.rest': {
             label: 'DB (deutschlandweit)',
             area: 'Deutschland',
+            dialect: 'hafas-rest',
             radar: false,
             lineSearch: false,
-            fallbacks: ['v6.vbb.transport.rest']
+            fallbacks: ['api.transitous.org', 'v6.vbb.transport.rest']
+        },
+        'api.transitous.org': {
+            label: 'Transitous (deutschlandweit)',
+            area: 'Deutschland und Nachbarl\u00e4nder',
+            dialect: 'motis',
+            radar: true,
+            lineSearch: false,
+            geocoder: 'builtin',
+            radarIntervalMs: 30000,
+            attribution: {
+                text: 'Daten: Transitous / OpenStreetMap',
+                url: 'https://transitous.org/sources/'
+            },
+            fallbacks: ['v6.db.transport.rest', 'v6.vbb.transport.rest']
         }
     };
 
@@ -56,6 +85,7 @@ const BvgApi = (() => {
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
     const SERVER_ERROR_RETRIES = 1;
+    const DEFAULT_RADAR_INTERVAL_MS = 10000;
     const RETRY_DELAY_MS = 1500;
 
     let baseUrl = 'https://' + DEFAULT_PROVIDER;
@@ -71,8 +101,16 @@ const BvgApi = (() => {
     function setProvider(host) {
         if (PROVIDERS[host]) {
             baseUrl = 'https://' + host;
+            if (isMotis()) {
+                // The adapter borrows this module's fetcher so rate limiting,
+                // the 5xx retry and the outage diagnostics apply there too.
+                MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
+            }
         }
     }
+
+    /** Is the selected endpoint a MOTIS instance rather than a transport.rest one? */
+    const isMotis = () => getCapabilities().dialect === 'motis';
 
     /**
      * Get the current provider host
@@ -99,12 +137,22 @@ const BvgApi = (() => {
      */
     function getCapabilities(host) {
         const entry = PROVIDERS[host || getProvider()];
-        if (!entry) return { label: '', area: '', radar: false, lineSearch: false };
+        if (!entry) {
+            return {
+                label: '', area: '', dialect: 'hafas-rest', radar: false,
+                lineSearch: false, geocoder: 'external',
+                radarIntervalMs: DEFAULT_RADAR_INTERVAL_MS, attribution: null
+            };
+        }
         return {
             label: entry.label,
             area: entry.area,
+            dialect: entry.dialect || 'hafas-rest',
             radar: !!entry.radar,
-            lineSearch: !!entry.lineSearch
+            lineSearch: !!entry.lineSearch,
+            geocoder: entry.geocoder || 'external',
+            radarIntervalMs: entry.radarIntervalMs || DEFAULT_RADAR_INTERVAL_MS,
+            attribution: entry.attribution || null
         };
     }
 
@@ -117,6 +165,22 @@ const BvgApi = (() => {
         const current = PROVIDERS[getProvider()];
         const host = (current && current.fallbacks || []).find(h => PROVIDERS[h]);
         return host ? { host, label: PROVIDERS[host].label } : null;
+    }
+
+    /**
+     * Does this station ID belong to the selected backend?
+     *
+     * transport.rest speaks bare numeric HAFAS IDs; MOTIS speaks the source
+     * dataset's ID with a feed tag in front. A board saved against one shows
+     * nothing at all against the other, so the app re-resolves by name instead
+     * of failing silently.
+     * @param {string} id
+     * @returns {boolean}
+     */
+    function isNativeStationId(id) {
+        const value = String(id || '');
+        if (!value) return false;
+        return isMotis() ? MotisApi.isMotisId(value) : !MotisApi.isMotisId(value);
     }
 
     /**
@@ -247,6 +311,7 @@ const BvgApi = (() => {
     async function searchPlaces(query, opt = {}) {
         const text = (query || '').trim();
         if (text.length < 2) return [];
+        if (isMotis()) return MotisApi.searchPlaces(text, opt);
 
         const params = new URLSearchParams({
             query: text,
@@ -330,6 +395,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} Departures data
      */
     async function getDepartures(stationId, filters = {}, duration = 30, results = null) {
+        if (isMotis()) return MotisApi.getDepartures(stationId, filters, duration, results, PRODUCTS);
+
         const params = new URLSearchParams({
             duration: String(duration),
             remarks: 'true',
@@ -355,6 +422,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} Station data
      */
     async function getStation(stationId) {
+        if (isMotis()) return MotisApi.getStation(stationId);
+
         const params = new URLSearchParams({
             linesOfStops: 'true',
             pretty: 'false'
@@ -391,6 +460,8 @@ const BvgApi = (() => {
     }
 
     async function getJourneys(from, to, filters = {}, opt = {}) {
+        if (isMotis()) return MotisApi.getJourneys(from, to, filters, opt, PRODUCTS);
+
         const params = new URLSearchParams({
             results: String(opt.results || 4),
             stopovers: 'false',
@@ -430,6 +501,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { trip: {...} }
      */
     async function getTrip(tripId, withPolyline = true) {
+        if (isMotis()) return MotisApi.getTrip(tripId);
+
         const params = new URLSearchParams({
             stopovers: 'true',
             remarks: 'false',
@@ -477,6 +550,7 @@ const BvgApi = (() => {
      */
     async function getRadar(bbox, opt = {}) {
         assertSupported('radar');
+        if (isMotis()) return MotisApi.getRadar(bbox, opt);
         const params = new URLSearchParams({
             north: String(bbox.north),
             west: String(bbox.west),
@@ -537,6 +611,7 @@ const BvgApi = (() => {
         PRODUCTS,
         DEFAULT_PROVIDER,
         getCapabilities,
+        isNativeStationId,
         searchPlaces,
         searchStations,
         searchAddresses,

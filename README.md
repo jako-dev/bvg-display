@@ -94,7 +94,7 @@ that has **not** configured its own stations starts with what is listed here:
 |-----|-------------|
 | `stations` | Default stations. `name` and `walkTime` are optional — a missing name is looked up from the API on first load |
 | `lock` | `true` makes this file win over the client's own saved settings — for dedicated wall displays that must always show the same stations |
-| `apiProvider` | `v6.bvg.transport.rest`, `v6.vbb.transport.rest` or `v6.db.transport.rest` |
+| `apiProvider` | `v6.bvg.transport.rest`, `v6.vbb.transport.rest`, `v6.db.transport.rest` or `api.transitous.org` |
 | `departureCount` | 1–15 |
 | `refreshInterval` | 10–120 seconds |
 | `theme` | `dark` or `modern` |
@@ -424,28 +424,73 @@ bvg-display/
 
 Uses the public [transport.rest](https://transport.rest/) APIs:
 
-| Endpoint | Coverage | Live vehicles | Search by line |
-|----------|----------|---------------|----------------|
-| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
-| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
-| `v6.db.transport.rest` | Germany (DB) | no | no |
+Uses the public [transport.rest](https://transport.rest/) endpoints and
+[Transitous](https://transitous.org/):
 
-- No API key required
-- Rate limit: ~100 requests/minute
+| Endpoint | Coverage | Live vehicles | Search by line | Poll |
+|----------|----------|---------------|----------------|------|
+| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes | 10 s |
+| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes | 10 s |
+| `v6.db.transport.rest` | Germany (DB) | no | no | — |
+| `api.transitous.org` | Germany and neighbours | yes | no | 30 s |
+
+- No API key required, no registration
 - CORS enabled (browser-friendly)
 
-All three speak the same request and response shape, so switching sources is a
-base-URL swap. They are not the same backend, though: the BVG and VBB endpoints
-are HAFAS deployments, while the DB one was migrated to `db-vendo-client` after
-Deutsche Bahn retired its HAFAS endpoint, and that client has no equivalent for
-`/radar` or `/trips?lineName=`.
+The three transport.rest endpoints speak one request and response shape;
+switching between them is a base-URL swap. They are not the same backend,
+though: BVG and VBB are HAFAS deployments, while the DB one was migrated to
+`db-vendo-client` after Deutsche Bahn retired its HAFAS endpoint, and that
+client has no equivalent for `/radar` or `/trips?lineName=`.
 
-Rather than let those calls fail, each provider declares what it supports in
-`PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
+Transitous is a different system again — a community-run
+[MOTIS](https://github.com/motis-project/motis) instance — and is translated in
+`js/motis.js`, which maps its vocabulary onto the same objects the rest of the
+app renders. Two things there are worth knowing:
+
+- Its geocoder returns stops, points of interest and addresses from one index,
+  so the separate Photon lookup is switched off while it is selected.
+- `map/trips` returns trip *segments* with a departure, an arrival and a shape,
+  not vehicle positions. A position is interpolated along the shape for the
+  current moment, the way MOTIS's own map does it.
+
+Rather than let unsupported calls fail, each provider declares what it supports
+in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
 unsupported endpoint are refused before a request goes out, and
-`applyProviderCapabilities()` (`js/app.js`) hides the two map controls that
-depend on them. Departure boards, journey planning, station and place search and
-route shapes work on every source.
+`applyProviderCapabilities()` (`js/app.js`) hides the map controls that depend
+on them. Departure boards, journey planning, station and place search and route
+shapes work on every source.
+
+### Station IDs are not portable
+
+transport.rest uses bare numeric HAFAS IDs (`900120025`); MOTIS uses the source
+dataset's ID behind a feed tag (`de-DELFI_de:11000:900120025`). A board saved
+against one shows nothing at all against the other, so switching source
+re-resolves each saved station by the name it was stored under
+(`remapStationsForProvider()` in `js/app.js`). Names and walking times are kept;
+only IDs change. A station with no counterpart is dropped and named in a
+message rather than left in the list loading nothing.
+
+This also runs at startup, so a `config.json` or a URL that names BVG IDs works
+when pointed at another source.
+
+### Using Transitous
+
+Transitous is donated infrastructure. Its [usage
+policy](https://transitous.org/api/) sets conditions this app already meets in
+part, and one it cannot meet for you:
+
+- **Attribution.** A link to `https://transitous.org/sources/` is shown in the
+  footer whenever Transitous is the selected source — including inside a short
+  embedded card, where the rest of the footer is hidden.
+- **Polling.** Live vehicles poll every 30 s rather than the 10 s used against
+  transport.rest. The policy asks you to get in touch before making many
+  requests; if you run this on a wall display all day, do that.
+- **Contact information.** A browser app cannot set a `User-Agent`, so the
+  policy accepts the `Referer` header instead — on the condition that the site
+  carries contact information. **If you deploy this with Transitous enabled,
+  add a way to reach you** (a repository link or an email in the footer or
+  README of your deployment). This repository does not add one for you.
 
 Endpoints used:
 
