@@ -2226,12 +2226,24 @@
      * nudge inside it changes nothing about what is on screen.
      */
     function updateReloadAreaOffer() {
-        const caps = TransitApi.getCapabilities();
-        const relevant = state.viewMode === 'map' && state.mapLive && caps.radar;
-        const view = relevant ? TransitMap.getBounds() : null;
+        dom.mapReloadArea.classList.toggle('hidden', !radarIsStale());
+        // Panning does not change the markers, but it does change whether the
+        // count still describes anything on screen.
+        refreshLiveNote();
+    }
 
-        const stale = !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
-        dom.mapReloadArea.classList.toggle('hidden', !stale);
+    /**
+     * Are the loaded vehicles from somewhere other than what is on screen?
+     *
+     * True once the view has left the box they were fetched for — which is both
+     * when to offer a reload and when the count on the status line stops
+     * describing anything the user can see.
+     */
+    function radarIsStale() {
+        const caps = TransitApi.getCapabilities();
+        if (state.viewMode !== 'map' || !state.mapLive || !caps.radar) return false;
+        const view = TransitMap.getBounds();
+        return !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
     }
 
     /** Grow a box by a fraction of its own span on every side. */
@@ -2295,15 +2307,28 @@
         TransitMap.setRoutes(list);
     }
 
-    function applyMapFilters() {
-        const focused = mapFocus && mapFocus.lines && mapFocus.lines.size > 0;
-        const vehicles = liveVehicles.filter(v => focused
+    /** Is the map currently narrowed to particular lines? */
+    const mapIsFocused = () => !!(mapFocus && mapFocus.lines && mapFocus.lines.size > 0);
+
+    /** The loaded vehicles that the current focus or product filter lets through. */
+    function filteredVehicles() {
+        const focused = mapIsFocused();
+        return liveVehicles.filter(v => focused
             ? mapFocus.lines.has(normaliseLine(v.label))
             : state.mapFilters[v.product] !== false);
+    }
 
+    function applyMapFilters() {
+        const vehicles = filteredVehicles();
         TransitMap.setVehicles(vehicles);
-        dom.mapFilters.classList.toggle('is-muted', !!focused);
-        updateLiveNote(focused, vehicles.length);
+        dom.mapFilters.classList.toggle('is-muted', mapIsFocused());
+        refreshLiveNote(vehicles.length);
+    }
+
+    /** Restate what "live" means without touching the markers. */
+    function refreshLiveNote(count) {
+        updateLiveNote(mapIsFocused(),
+            typeof count === 'number' ? count : filteredVehicles().length);
     }
 
     const normaliseLine = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -2322,9 +2347,22 @@
     function updateLiveNote(focused, count) {
         let live = '';
         if (state.mapLive && TransitApi.getCapabilities().radar) {
-            if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
-            else if (count > 0) live = `Live: ${count} Fahrzeuge`;
-            if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            if (radarIsStale()) {
+                // Reporting a count for vehicles that are all off screen reads
+                // as "they are here somewhere"; they are not, and the button
+                // over the map is what fixes it.
+                live = 'Fahrzeuge stammen aus einem anderen Bereich';
+            } else if (focused) {
+                live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (count > 0) {
+                live = `Live: ${count} Fahrzeuge`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (radarFetchedBounds) {
+                // A poll that found nothing is a fact worth stating: silence
+                // next to an empty map is indistinguishable from a failure.
+                live = 'Keine Fahrzeuge in diesem Bereich';
+            }
         } else if (!TransitApi.getCapabilities().radar && !mapHasRoutes) {
             // No live feed on this source, so an empty map is the normal state
             // rather than a failure — point at what does put something on it.
@@ -2380,38 +2418,63 @@
             // One entry per direction, not per running vehicle: the point is
             // the line's route, and every run of a direction draws the same one.
             const seen = new Set();
-            const directions = [];
+            const entries = [];
             for (const trip of trips) {
                 const line = trip.line || {};
                 const direction = trip.direction || (trip.destination && trip.destination.name) || '';
                 const key = `${line.name}|${direction}`;
                 if (!line.name || seen.has(key)) continue;
                 seen.add(key);
-                directions.push({
+                entries.push({
                     id: trip.id,
                     name: line.name,
                     product: line.product || '',
-                    direction
+                    direction,
+                    // Backends that only know about single runs return no kind;
+                    // each of their results is one direction of one line.
+                    kind: trip.kind || 'variant'
                 });
             }
 
-            if (directions.length === 0) {
+            if (entries.length === 0) {
                 dom.mapLineResults.innerHTML =
                     `<div class="search-result-item">${lineMissHtml(query)}</div>`;
                 return;
             }
 
-            dom.mapLineResults.innerHTML = directions.map(entry => `
-                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
-                     data-label="${escapeHtml(`${entry.name} → ${entry.direction}`)}">
-                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
-                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
-                </div>
-            `).join('');
+            // The line end to end is what someone typing "M10" is usually
+            // after; its individual routes — a short working, a branch — are
+            // worth having, but below and clearly separated.
+            const whole = entries.filter(e => e.kind === 'line');
+            const variants = entries.filter(e => e.kind !== 'line');
+
+            dom.mapLineResults.innerHTML = [
+                ...whole.map(e => lineResultHtml(e, true)),
+                whole.length && variants.length
+                    ? '<div class="search-result-divider">Einzelne Routen</div>' : '',
+                ...variants.map(e => lineResultHtml(e, false))
+            ].filter(Boolean).join('');
         } catch (e) {
             console.error('Line search failed:', e);
             dom.mapLineResults.innerHTML = `<div class="search-result-item">Fehler: ${escapeHtml(e.message)}</div>`;
         }
+    }
+
+    /**
+     * One row of the line dropdown. The whole-line row is marked so it reads as
+     * the headline answer rather than as the first of a list of near-identical
+     * entries.
+     */
+    function lineResultHtml(entry, isWholeLine) {
+        const label = `${entry.name} ${isWholeLine ? '·' : '→'} ${entry.direction}`.trim();
+        return `
+                <div class="search-result-item${isWholeLine ? ' is-whole-line' : ''}"
+                     data-trip-id="${escapeHtml(entry.id)}" data-label="${escapeHtml(label)}">
+                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
+                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
+                    ${isWholeLine ? '<span class="line-result-tag">ganze Linie</span>' : ''}
+                </div>
+            `;
     }
 
     /** Shared with the board badges so a line keeps its colour everywhere. */

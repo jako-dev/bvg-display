@@ -69,8 +69,17 @@ const MotisApi = (() => {
     const routeCache = new Map();
     const ROUTE_ID_PREFIX = 'motis-route:';
 
-    /** How far around the map centre a line search looks. */
-    const SEARCH_MIN_SPAN = 0.06;   // ~7 km — a zoomed-in view still finds things
+    /**
+     * How far around the map centre a line search looks.
+     *
+     * The minimum is sized to a line rather than to a viewport: searching from
+     * a zoomed-in street view used to return only the couple of segments inside
+     * the box, so the "whole line" came out as a stub. ~13 x 13 km covers a
+     * tram or metro line end to end while staying far below what a whole-city
+     * box would cost.
+     */
+    const SEARCH_MIN_SPAN_LAT = 0.12;
+    const SEARCH_MIN_SPAN_LON = 0.18;
     const SEARCH_MAX_SPAN_LAT = 0.32;
     const SEARCH_MAX_SPAN_LON = 0.55;   // together, comfortably a whole city
     const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
@@ -257,9 +266,9 @@ const MotisApi = (() => {
         const centreLat = (bounds.north + bounds.south) / 2;
         const centreLon = (bounds.east + bounds.west) / 2;
         const spanLat = Math.min(SEARCH_MAX_SPAN_LAT,
-            Math.max(SEARCH_MIN_SPAN, Math.abs(bounds.north - bounds.south)));
+            Math.max(SEARCH_MIN_SPAN_LAT, Math.abs(bounds.north - bounds.south)));
         const spanLon = Math.min(SEARCH_MAX_SPAN_LON,
-            Math.max(SEARCH_MIN_SPAN, Math.abs(bounds.east - bounds.west)));
+            Math.max(SEARCH_MIN_SPAN_LON, Math.abs(bounds.east - bounds.west)));
         return {
             south: centreLat - spanLat / 2, north: centreLat + spanLat / 2,
             west: centreLon - spanLon / 2, east: centreLon + spanLon / 2
@@ -275,10 +284,18 @@ const MotisApi = (() => {
      * being appended, otherwise the drawn line doubles back on itself.
      */
     function assembleRoute(info, polylines, stops) {
+        return assembleFromSegments(info.segments || [], polylines, stops);
+    }
+
+    /**
+     * Stitch an ordered list of segments into one path. See assembleRoute for
+     * why each segment has to be oriented before it is appended.
+     */
+    function assembleFromSegments(segments, polylines, stops) {
         const points = [];
         const routeStops = [];
 
-        for (const segment of info.segments || []) {
+        for (const segment of segments) {
             const shared = polylines[segment.polyline];
             const from = stops[segment.from];
             const to = stops[segment.to];
@@ -314,13 +331,94 @@ const MotisApi = (() => {
     }
 
     /**
-     * Find a line by name and return one entry per matching route.
+     * Every distinct stop-to-stop hop a set of routes runs over.
+     *
+     * MOTIS splits one line into several routes — one per distinct stop
+     * sequence, so short workings and each direction are separate entries.
+     * Drawing any single one of them draws part of the line, which is what
+     * made a search for M10 come back as a handful of stops. Pooling their
+     * segments first gives the line as a whole.
+     */
+    function collectEdges(infos, polylines) {
+        const edges = new Map();
+        for (const info of infos) {
+            for (const segment of info.segments || []) {
+                if (!polylines[segment.polyline]) continue;
+                // The same hop appears once per route running it, and once per
+                // direction with the endpoints swapped.
+                const key = [segment.from, segment.to].sort((a, b) => a - b).join('-');
+                if (!edges.has(key)) {
+                    edges.set(key, { from: segment.from, to: segment.to, polyline: segment.polyline });
+                }
+            }
+        }
+        return [...edges.values()];
+    }
+
+    /**
+     * The longest run through the pooled hops, end to end.
+     *
+     * A line's hops form a mostly path-shaped graph — a spine with the odd
+     * branch where a short working peels off. The two ends of the longest walk
+     * through it are the termini, and that walk is the route to draw. Found by
+     * the standard two-pass search: the farthest stop from anywhere is one end,
+     * and the farthest stop from *that* is the other.
+     */
+    function longestRun(edges) {
+        if (edges.length === 0) return { path: [], ends: [] };
+
+        const neighbours = new Map();
+        for (const edge of edges) {
+            if (!neighbours.has(edge.from)) neighbours.set(edge.from, []);
+            if (!neighbours.has(edge.to)) neighbours.set(edge.to, []);
+            neighbours.get(edge.from).push({ stop: edge.to, edge });
+            neighbours.get(edge.to).push({ stop: edge.from, edge });
+        }
+
+        // Farthest stop from `origin`, plus how to get there. Hop count rather
+        // than distance: a line's hops are similar lengths, and it keeps this
+        // linear.
+        const walk = (origin) => {
+            const previous = new Map([[origin, null]]);
+            const queue = [origin];
+            let last = origin;
+            for (let i = 0; i < queue.length; i++) {
+                const stop = queue[i];
+                last = stop;
+                for (const step of neighbours.get(stop) || []) {
+                    if (previous.has(step.stop)) continue;
+                    previous.set(step.stop, { stop, edge: step.edge });
+                    queue.push(step.stop);
+                }
+            }
+            return { last, previous };
+        };
+
+        const first = walk(edges[0].from);
+        const second = walk(first.last);
+
+        const path = [];
+        for (let stop = second.last; ;) {
+            const step = second.previous.get(stop);
+            if (!step) break;
+            path.unshift({ from: step.stop, to: stop, polyline: step.edge.polyline });
+            stop = step.stop;
+        }
+        return { path, ends: [first.last, second.last] };
+    }
+
+    /**
+     * Find a line by name and return the whole line plus its variants.
      *
      * Unlike the transport.rest search this is geographic rather than
      * network-wide — MOTIS has no search-by-name endpoint — so it covers the
      * area around what is on screen. It reads the scheduled route rather than a
      * running vehicle, which means a line that is not currently operating still
      * draws.
+     *
+     * The first result is the line end to end; the ones after it are the
+     * individual routes MOTIS holds for it, which are worth keeping because a
+     * short working or a branch is a real thing to want to look at.
      *
      * @param {string} query
      * @param {{bounds: Object, zoom: number, results: number}} opt
@@ -347,34 +445,61 @@ const MotisApi = (() => {
 
         routeCache.clear();
         const trips = [];
-        const seen = new Set();
 
-        for (let i = 0; i < infos.length; i++) {
-            const info = infos[i];
+        // Group the matching routes by the line they belong to: a search for
+        // "M10" should produce one M10, not one per stop sequence.
+        const lines = new Map();
+        for (const info of infos) {
             const match = (info.transitRoutes || []).find(r =>
                 normalise(r.shortName) === wanted || normalise(r.longName) === wanted);
             if (!match) continue;
-
-            const assembled = assembleRoute(info, polylines, stops);
-            if (assembled.points.length < 2) continue;
-
-            const last = assembled.stops[assembled.stops.length - 1];
-            const direction = (last && last.name) || match.longName || '';
-            const key = `${match.shortName}|${direction}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-
-            const id = `${ROUTE_ID_PREFIX}${i}`;
             const name = match.shortName || match.longName || query;
-            routeCache.set(id, {
-                id, name, direction,
-                product: productOf(info.mode),
-                mode: info.mode || '',
-                polyline: toFeatureCollection(assembled.points, assembled.stops)
-            });
+            if (!lines.has(name)) lines.set(name, { name, match, infos: [] });
+            lines.get(name).infos.push(info);
+        }
 
-            trips.push({ id, line: { name, product: productOf(info.mode) }, direction });
-            if (opt.results && trips.length >= opt.results) break;
+        for (const line of lines.values()) {
+            const product = productOf(line.infos[0].mode);
+            const mode = line.infos[0].mode || '';
+
+            // --- the line as a whole ---
+            const edges = collectEdges(line.infos, polylines);
+            const { path, ends } = longestRun(edges);
+            const whole = assembleFromSegments(path, polylines, stops);
+            if (whole.points.length >= 2) {
+                const [a, b] = ends.map(i => (stops[i] && stops[i].name) || '');
+                const id = `${ROUTE_ID_PREFIX}line:${line.name}`;
+                const direction = [a, b].filter(Boolean).join(' \u2194 ');
+                routeCache.set(id, {
+                    id, name: line.name, direction, product, mode,
+                    polyline: toFeatureCollection(whole.points, whole.stops)
+                });
+                trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
+            }
+
+            // --- and each route it is made of ---
+            const seen = new Set();
+            for (let i = 0; i < line.infos.length; i++) {
+                const info = line.infos[i];
+                const assembled = assembleRoute(info, polylines, stops);
+                if (assembled.points.length < 2) continue;
+
+                const last = assembled.stops[assembled.stops.length - 1];
+                const variantDirection = (last && last.name) || line.match.longName || '';
+                if (seen.has(variantDirection)) continue;
+                seen.add(variantDirection);
+
+                const id = `${ROUTE_ID_PREFIX}${line.name}:${i}`;
+                routeCache.set(id, {
+                    id, name: line.name, direction: variantDirection, product, mode,
+                    polyline: toFeatureCollection(assembled.points, assembled.stops)
+                });
+                trips.push({
+                    id, line: { name: line.name, product },
+                    direction: variantDirection, kind: 'variant'
+                });
+                if (opt.results && trips.length >= opt.results) break;
+            }
         }
 
         return { trips };
