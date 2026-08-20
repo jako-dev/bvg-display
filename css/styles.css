@@ -1,5 +1,5 @@
 /* =============================================================================
-   BVG Abfahrtsmonitor — design system
+   Abfahrtsmonitor — design system
 
    One token set, two themes. Everything below is expressed in those tokens, so
    a theme is a palette swap rather than a parallel stylesheet.
@@ -237,6 +237,16 @@ button, input, select {
     font-size: var(--text-xs);
     color: var(--text-3);
 }
+
+/* Credit for sources that require it — a link, and it has to stay legible. */
+.data-attribution {
+    color: var(--text-3);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    white-space: nowrap;
+}
+
+.data-attribution:hover { color: var(--text-2); }
 
 /* ===== View switch (header) ===== */
 .view-switch {
@@ -1202,6 +1212,13 @@ input.walk-time-input {
 
 .map-status.is-warning { color: var(--warn); }
 
+/* Not every data source answers every call: the nationwide DB endpoint has no
+   live-vehicle feed and no search-by-line. Hide those controls rather than
+   leave them to fail — see applyProviderCapabilities() in app.js. */
+body[data-radar="no"] .map-live,
+body[data-radar="no"] .map-filters,
+body[data-line-search="no"] .map-line-search { display: none; }
+
 .map-view { position: relative; }
 
 .map-container {
@@ -1446,6 +1463,19 @@ body.kiosk-mode .display-header:hover .view-switch {
     /* "Letzte Aktualisierung" and the data source are reference information,
        not something you read off a glanceable board. */
     .display-footer { display: none; }
+
+    /* …unless the selected source requires a visible credit, which is a
+       condition of using its data and outranks the space it costs. The rest of
+       the footer still goes; only the link stays. */
+    body[data-attribution="required"] .display-footer {
+        display: flex;
+        justify-content: flex-end;
+        padding: 0 var(--space-3) var(--space-1);
+        border-top: 0;
+    }
+
+    body[data-attribution="required"] #last-update,
+    body[data-attribution="required"] .data-source { display: none; }
 
     /* Tighter rows: the point of the card is how many departures fit. */
     .departure-row { min-height: 44px; }

@@ -1,7 +1,7 @@
 {
-  "name": "BVG Abfahrtsmonitor",
-  "short_name": "BVG Monitor",
-  "description": "Echtzeit-Abfahrtsmonitor für Berliner Nahverkehr (BVG/VBB).",
+  "name": "Abfahrtsmonitor",
+  "short_name": "Abfahrten",
+  "description": "Echtzeit-Abfahrtsmonitor für den Nahverkehr in Deutschland.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

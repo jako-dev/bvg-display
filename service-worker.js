@@ -9,7 +9,7 @@
 // Bump this whenever a shell file changes so clients pick up the new set
 // instead of serving a stale mix of old and new files.
 const CACHE_VERSION = 'v4';
-const CACHE_NAME = `bvg-shell-${CACHE_VERSION}`;
+const CACHE_NAME = `abfahrtsmonitor-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [
     './',
