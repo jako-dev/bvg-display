@@ -561,6 +561,27 @@ the fetch from map movement is what previously made a single click fire several
 requests, because a programmatic fit to a new route moves the map exactly as a
 drag does.
 
+It also clears the line focus. While a line or a connection is shown, live
+vehicles are narrowed to it — so somewhere that line does not run, a reload
+would fetch a full response and draw none of it. The route stays on the map;
+the narrowing does not.
+
+### Line colours
+
+They live in one place: `.line-tint` in `css/styles.css`. Seven product
+families plus every individual U-Bahn and S-Bahn line, taken from BVG's own
+palette and held one step back from full saturation so a full board does not
+turn into a colour chart.
+
+The map reads that same rule rather than keeping a table of its own — a probe
+element is given the badge's classes and its computed background is read back
+(`TransitMap.lineColor`). A second table is what made a U5 brown on the board
+and blue on the map. Change the CSS and the badge, the journey chip, the drawn
+route and the live vehicle labels all follow.
+
+A line with no rule of its own falls back to its product's colour, and an
+unknown product to a neutral grey.
+
 ### Map tiles
 
 Map tiles come from OpenStreetMap by default. That is a shared, donated

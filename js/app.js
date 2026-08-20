@@ -17,6 +17,10 @@
     const MAX_ALERTS = 3;
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
+    // The line lookup asks for every route in a box, which is a far heavier
+    // request than a name lookup — worth waiting until the typing has actually
+    // stopped rather than firing on the way to "M10".
+    const LINE_DEBOUNCE_MS = 1000;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
     const RADAR_INTERVAL_MS = 30000; // Live vehicle poll — one request per tick
     // The API's own maximum. Anything lower and a busy viewport comes back as
@@ -693,7 +697,7 @@
                 dom.mapLineResults.classList.add('hidden');
                 return;
             }
-            lineTimeout = setTimeout(() => searchMapLine(query), SEARCH_DEBOUNCE_MS);
+            lineTimeout = setTimeout(() => searchMapLine(query), LINE_DEBOUNCE_MS);
         });
 
         dom.mapLineInput.addEventListener('keydown', (e) => {
@@ -2265,6 +2269,11 @@
 
     async function reloadRadarForView() {
         dom.mapReloadArea.disabled = true;
+        // "Fahrzeuge hier laden" has to mean what it says. While a line or a
+        // connection is shown, live vehicles are narrowed to it — so somewhere
+        // that line does not run, a reload fetched a full response and drew
+        // none of it. The route stays on the map; the narrowing does not.
+        setMapFocus([]);
         try {
             await fetchRadar();
         } finally {
