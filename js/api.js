@@ -1,9 +1,9 @@
 /**
  * Transport API Module
  * Handles all communication with the transport.rest API
- * Supports BVG (Berlin) and VBB (Berlin + Brandenburg)
+ * Supports Transitous (MOTIS) and the transport.rest endpoints for DB, BVG and VBB.
  */
-const BvgApi = (() => {
+const TransitApi = (() => {
     'use strict';
 
     /**

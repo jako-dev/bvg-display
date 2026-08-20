@@ -124,7 +124,7 @@ const MotisApi = (() => {
 
     /**
      * Wrap decoded points in the GeoJSON FeatureCollection that
-     * BvgApi.polylineToLatLngs() and polylineStations() already read, so the
+     * TransitApi.polylineToLatLngs() and polylineStations() already read, so the
      * map and the journey view need no MOTIS-specific branch.
      *
      * Stops are attached to their nearest shape point rather than appended,

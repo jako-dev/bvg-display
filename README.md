@@ -1,10 +1,10 @@
-# BVG Abfahrtsmonitor
+# Abfahrtsmonitor
 
-A real-time departure display for Berlin public transport (BVG/VBB), available as a **web app** and as **ESP32 LED matrix display** firmware.
+A real-time departure display for German public transport, available as a **web app** and as **ESP32 LED matrix display** firmware. Departure boards, journey planning and a live route map, on any stop in Germany — with Berlin-specific data sources still selectable.
 
 Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic).
 
-**[Live Demo →](https://jako-dev.github.io/bvg-display/)**
+**[Live Demo →](https://jako-dev.github.io/abfahrtsmonitor/)**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -43,7 +43,7 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 
 ### Quick Start
 
-Open the [live version](https://jako-dev.github.io/bvg-display/) or run locally:
+Open the [live version](https://jako-dev.github.io/abfahrtsmonitor/) or run locally:
 
 ```bash
 python3 -m http.server 8080
@@ -122,7 +122,7 @@ localStorage, so embedding the board somewhere never overwrites the settings
 that browser already has.
 
 ```
-https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1
+https://jako-dev.github.io/abfahrtsmonitor/?stop=900100003:4&stop=900120005&view=split&kiosk=1
 ```
 
 | Parameter | Alias | Example |
@@ -186,7 +186,7 @@ status — which looks like a bug in this app and is not.
 The app handles it: requests are retried once, the board keeps showing the last
 departures it loaded (dimmed, with the time they were fetched) instead of
 blanking, and it offers to switch to the other endpoint — BVG and VBB are
-separately hosted and both cover Berlin, so one being down rarely means both.
+separately hosted, so one being down rarely means the next one is.
 
 ### Showing a line
 
@@ -221,7 +221,7 @@ Because the config travels in the URL, no per-client setup is needed — add a
 ```yaml
 type: iframe
 url: >-
-  https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
+  https://jako-dev.github.io/abfahrtsmonitor/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
 aspect_ratio: 50%
 ```
 
@@ -239,8 +239,8 @@ serves:
 
 | Source | URL |
 |--------|-----|
-| `main` (on every push) | `https://jako-dev.github.io/bvg-display/` |
-| any branch (on demand) | `https://jako-dev.github.io/bvg-display/preview/<branch>/` |
+| `main` (on every push) | `https://jako-dev.github.io/abfahrtsmonitor/` |
+| any branch (on demand) | `https://jako-dev.github.io/abfahrtsmonitor/preview/<branch>/` |
 
 Both are live at the same time, so previewing a branch never takes the demo
 down. `/preview/` lists whatever is currently published.
@@ -290,7 +290,7 @@ The `esp32/` directory contains firmware for a physical departure display using 
 - **Automatic rollback** — if a firmware update breaks WiFi, auto-reverts to last known good
 - **Night mode** — scheduled display off (e.g. 22:00–06:00)
 - **Adjustable brightness**
-- **mDNS** — accessible at `http://bvg-display.local`
+- **mDNS** — accessible at `http://abfahrtsmonitor.local`
 - **Watchdog** — auto-reboot on hang
 - **Factory reset** — via web UI or hold BOOT button 5 seconds
 - **Stale data indicator** — blinking red dot when API hasn't responded in >5 min
@@ -349,15 +349,15 @@ pio device monitor --baud 115200
 
 ### First-Time Setup
 
-1. Power on → ESP32 creates WiFi AP **"BVG-Display"** (open)
+1. Power on → ESP32 creates WiFi AP **"Abfahrtsmonitor"** (open)
 2. Connect with phone/laptop → captive portal opens
 3. Enter WiFi credentials → device connects to your network
-4. Access config at `http://bvg-display.local` or the device IP
+4. Access config at `http://abfahrtsmonitor.local` or the device IP
 5. Add stations → LED matrix shows departures
 
 ### OTA Updates
 
-When a new [GitHub Release](https://github.com/jako-dev/bvg-display/releases) is published:
+When a new [GitHub Release](https://github.com/jako-dev/abfahrtsmonitor/releases) is published:
 1. Open the device config page
 2. Click "Nach Updates suchen" in the Firmware section
 3. Click "Update installieren"
@@ -388,7 +388,7 @@ All runtime settings are adjustable from the config page — no reflashing neede
 ## Project Structure
 
 ```
-bvg-display/
+abfahrtsmonitor/
 ├── index.html              # Web app entry
 ├── config.json             # Optional deployment defaults (preset stations)
 ├── manifest.json           # PWA manifest (install as app)
@@ -549,7 +549,7 @@ missing.
 |---------|----------|
 | Panel stays dark | Check 5V power; verify shared GND with ESP32 |
 | Garbled display | Recheck HUB75 wiring, no loose jumpers |
-| Can't find "BVG-Display" AP | Reflash; hold BOOT during upload |
+| Can't find "Abfahrtsmonitor" AP | Reflash; hold BOOT during upload |
 | Upload fails | Hold BOOT when upload starts; lower `upload_speed` |
 | No departures | Check serial monitor; BVG API may be temporarily down |
 | Blinking red dot | API stale >5 min — check WiFi and internet connectivity |

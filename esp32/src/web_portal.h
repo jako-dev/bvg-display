@@ -11,7 +11,7 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BVG Display - Einrichtung</title>
+    <title>Abfahrtsmonitor - Einrichtung</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -102,7 +102,7 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
 </head>
 <body>
     <div class="container">
-        <h1>BVG Abfahrtsmonitor</h1>
+        <h1>Abfahrtsmonitor</h1>
         <p class="subtitle">ESP32 LED Panel Einrichtung</p>
 
         <div id="status-bar" class="status-bar">
@@ -254,7 +254,7 @@ const char PORTAL_HTML[] PROGMEM = R"rawhtml(
         <div class="card">
             <h2>Info</h2>
             <p style="font-size:0.8rem; color:#888; margin-bottom:8px;">
-                Dieses Interface ist erreichbar unter <strong id="info-hostname">bvg-display.local</strong> oder der IP-Adresse.
+                Dieses Interface ist erreichbar unter <strong id="info-hostname">abfahrtsmonitor.local</strong> oder der IP-Adresse.
                 Die LED-Anzeige aktualisiert sich automatisch alle 30 Sekunden.
             </p>
             <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#888;margin-bottom:4px;">

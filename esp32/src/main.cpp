@@ -174,7 +174,7 @@ bool checkAuth(AsyncWebServerRequest* request);
 // ===== Setup =====
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n=== BVG Display Starting ===");
+    Serial.println("\n=== Abfahrtsmonitor Starting ===");
 
     // Factory reset button (BOOT pin)
     pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
@@ -211,9 +211,9 @@ void setup() {
         syncNTP();
 
         // Start mDNS
-        if (MDNS.begin("bvg-display")) {
+        if (MDNS.begin("abfahrtsmonitor")) {
             MDNS.addService("http", "tcp", 80);
-            Serial.println("[mDNS] http://bvg-display.local");
+            Serial.println("[mDNS] http://abfahrtsmonitor.local");
         }
     }
 
@@ -464,7 +464,7 @@ void setupWebServer() {
         doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
         doc["wifi_ssid"] = wifiSSID;
         doc["ip"] = WiFi.localIP().toString();
-        doc["hostname"] = "bvg-display.local";
+        doc["hostname"] = "abfahrtsmonitor.local";
         doc["station_count"] = stationCount;
         doc["departure_count"] = departureCount;
         doc["uptime_seconds"] = millis() / 1000;
@@ -837,7 +837,7 @@ void setupWebServer() {
             http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
             http.begin(otaUrl);
             http.setTimeout(30000);
-            http.addHeader("User-Agent", "ESP32-BVG-Display");
+            http.addHeader("User-Agent", "ESP32-Abfahrtsmonitor");
             int httpCode = http.GET();
 
             if (httpCode != 200) {
@@ -1043,7 +1043,7 @@ void runFirmwareCheck() {
     HTTPClient http;
     http.begin(GITHUB_RELEASE_URL);
     http.setTimeout(10000);
-    http.addHeader("User-Agent", "ESP32-BVG-Display");
+    http.addHeader("User-Agent", "ESP32-Abfahrtsmonitor");
     int code = http.GET();
     if (code != 200) {
         jobHttpCode = 502;
@@ -1360,7 +1360,7 @@ void renderSetupScreen() {
     uint16_t yellow = matrix->color565(255, 204, 0);
     uint16_t cyan = matrix->color565(0, 200, 255);
     
-    drawString(matrix, "BVG Display", 20, 2, yellow);
+    drawString(matrix, "Abfahrtsmonitor", 26, 2, yellow);
     
     if (millis() - lastBlink > 2000) {
         showIP = !showIP;
@@ -1371,7 +1371,7 @@ void renderSetupScreen() {
         String ip = WiFi.softAPIP().toString();
         drawString(matrix, ip.c_str(), 10, 14, cyan);
     } else {
-        drawString(matrix, "WiFi: BVG-Display", 2, 14, cyan);
+        drawString(matrix, "WiFi: Abfahrtsmonitor", 2, 14, cyan);
     }
     
     drawString(matrix, "Setup via Browser", 5, 24, matrix->color565(150, 150, 150));
