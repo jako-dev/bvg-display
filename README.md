@@ -461,7 +461,14 @@ app renders. Two things there are worth knowing:
   so the separate Photon lookup is switched off while it is selected.
 - `map/trips` returns trip *segments* with a departure, an arrival and a shape,
   not vehicle positions. A position is interpolated along the shape for the
-  current moment, the way MOTIS's own map does it.
+  current moment, the way MOTIS's own map does it. Its `precision` parameter —
+  which sets how many decimal places the shapes are encoded with — is
+  deliberately left alone: the response does not say which value was used, so
+  asking for fewer places to save bandwidth means decoding against a number the
+  client only assumes, and being wrong by one divides every coordinate by ten.
+  Positions that land outside the requested box are discarded rather than
+  drawn, so a mis-scale shows up as "no vehicles" instead of a fleet in the
+  Atlantic.
 - There is no search-by-line-name endpoint, so the line lookup reads
   `map/routes` — every route in a box around what is on screen — and filters by
   name locally. That makes it **map-scoped rather than network-wide**: a line

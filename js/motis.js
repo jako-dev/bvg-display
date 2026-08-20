@@ -85,6 +85,13 @@ const MotisApi = (() => {
     const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
 
     /**
+     * Decimal places in a map/trips segment polyline. This is MOTIS's default
+     * and what the segment schema documents; see getRadar() for why the request
+     * does not ask for anything else.
+     */
+    const SEGMENT_PRECISION = 5;
+
+    /**
      * @param {{fetchJson: function(string): Promise<Object>, baseUrl: string}} opt
      *        The fetcher is injected so rate limiting, retries and the outage
      *        diagnostics in api.js apply here too.
@@ -755,7 +762,15 @@ const MotisApi = (() => {
             max: `${bbox.north},${bbox.east}`,
             startTime: now.toISOString(),
             endTime: new Date(now.getTime() + 30000).toISOString(),
-            precision: String(zoom >= 11 ? 5 : zoom >= 8 ? 4 : zoom >= 5 ? 3 : 2),
+            // `precision` is deliberately not sent. It sets how many decimal
+            // places the returned polylines are encoded with, and the response
+            // does not say which was used — so asking for fewer places to save
+            // bandwidth (as the spec suggests doing when zoomed out) means
+            // decoding against a number the client only assumes. Getting that
+            // wrong divides every coordinate by a power of ten and puts the
+            // whole fleet in the Gulf of Guinea. The default is 5, documented
+            // on the segment itself, so leaving it alone is the one setting
+            // that cannot disagree with the decoder.
             language: 'de'
         });
 
@@ -763,16 +778,30 @@ const MotisApi = (() => {
         const segments = Array.isArray(data) ? data : [];
         const at = now.getTime();
 
+        // Nothing outside the box was asked for, so anything outside it is a
+        // decode gone wrong rather than a vehicle. Generous, because an
+        // interpolated position sits between two stops and the far one can lie
+        // beyond the edge.
+        const margin = {
+            lat: Math.abs(bbox.north - bbox.south) || 1,
+            lon: Math.abs(bbox.east - bbox.west) || 1
+        };
+        const plausible = ([lat, lon]) =>
+            lat <= bbox.north + margin.lat && lat >= bbox.south - margin.lat
+            && lon <= bbox.east + margin.lon && lon >= bbox.west - margin.lon;
+
         const movements = [];
         const seen = new Set();
+        let implausible = 0;
         for (const segment of segments) {
             const from = Date.parse(segment.departure);
             const to = Date.parse(segment.arrival);
             if (!isFinite(from) || !isFinite(to) || at < from || at > to) continue;
 
-            const points = decodePolyline(segment.polyline, 5);
+            const points = decodePolyline(segment.polyline, SEGMENT_PRECISION);
             const position = pointAlong(points, to > from ? (at - from) / (to - from) : 0);
             if (!position) continue;
+            if (!plausible(position)) { implausible++; continue; }
 
             const trip = (segment.trips || [])[0] || {};
             const tripId = trip.tripId || '';
@@ -796,6 +825,9 @@ const MotisApi = (() => {
             if (opt.results && movements.length >= opt.results) break;
         }
 
+        if (implausible > 0) {
+            console.warn(`Discarded ${implausible} vehicle position(s) outside the requested area.`);
+        }
         return { movements };
     }
 
