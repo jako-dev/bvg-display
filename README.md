@@ -494,10 +494,18 @@ app renders. Two things there are worth knowing:
   to its single longest walk drew a ring as a semicircle. Stops that end the
   line (degree one in the pooled hops) are labelled permanently; a ring has
   none and gets none.
-- The searched box runs from roughly 13 × 13 km up to 55 × 60 km: sized to a
-  line rather than to the viewport at the bottom end, so a zoomed-in street
-  view does not return a stub, and regional rather than municipal at the top,
-  since an interurban tram runs well past what a city-sized box holds.
+- The search request is deliberately small — a box of a few kilometres up to
+  ~20 × 20 km around the view. It only has to *find* the line: when one is
+  picked, its full geometry is fetched per stop pattern from
+  `map/route-details`, which is **not box-limited**, so the drawn line runs to
+  its real ends however far away they are. (An earlier design fetched geometry
+  from the search request itself and grew the box to ~55 × 60 km to
+  compensate, which asked MOTIS for every route in a quarter of a Bundesland
+  and made searches slow and prone to timeouts.) At most four patterns are
+  fetched in full per line; the search response's own partial data is merged
+  in as a supplement, and if `route-details` is unavailable — it is an
+  experimental endpoint — the line degrades to what the search saw instead of
+  to nothing. Assembled lines are cached, so re-drawing one costs no requests.
 - Matching is **ranked substring**: exact short name, then prefix, then
   substring, and the long name last. So "5" still puts line 5 above RNV 5,
   "rnv" finds every RNV line, and "ringlinie" finds one by its description.
@@ -598,9 +606,10 @@ Two heuristics were tried and both made it worse: the longest walk through the
 hops cuts a ring in half, and preferring the straightest continuation at a
 junction follows a branch wherever the line doubles back on itself.
 
-Long-distance services are a harder limit. The search is a bounding box of at
-most ~55 × 60 km, so an ICE running Hamburg to Munich can never be drawn whole
-however far you zoom out. This is a map view of local and regional lines.
+Long-distance geometry now comes from `map/route-details` rather than the
+search box, so a line is no longer clipped at the box edge. The remaining limit
+is *finding* the line: it has to run somewhere near what is on screen for the
+search to see it at all.
 
 ### Line colours
 

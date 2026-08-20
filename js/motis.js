@@ -72,20 +72,27 @@ const MotisApi = (() => {
     /**
      * How far around the map centre a line search looks.
      *
-     * The minimum is sized to a line rather than to a viewport: searching from
-     * a zoomed-in street view used to return only the couple of segments inside
-     * the box, so the "whole line" came out as a stub. ~13 x 13 km covers a
-     * tram or metro line end to end while staying far below what a whole-city
-     * box would cost.
+     * The box only has to *find* the line — the full geometry comes from
+     * route-details afterwards, which is not box-limited. So it stays small: a
+     * few kilometres so a zoomed-in street view still finds the line one
+     * street over, at most ~20 x 20 km. The previous design fetched geometry
+     * from this same request and grew the box to ~55 x 60 km to compensate,
+     * which asked MOTIS for every route in a quarter of a Bundesland and is
+     * what made searches slow and prone to timeouts.
      */
-    const SEARCH_MIN_SPAN_LAT = 0.12;
-    const SEARCH_MIN_SPAN_LON = 0.18;
-    // The ceiling is regional rather than municipal: an interurban tram like
-    // RNV 5 runs Mannheim - Weinheim - Heidelberg, well past what a city-sized
-    // box holds, and anything outside the box is simply missing from the line.
-    const SEARCH_MAX_SPAN_LAT = 0.50;
-    const SEARCH_MAX_SPAN_LON = 0.80;
+    const SEARCH_MIN_SPAN_LAT = 0.05;
+    const SEARCH_MIN_SPAN_LON = 0.08;
+    const SEARCH_MAX_SPAN_LAT = 0.18;
+    const SEARCH_MAX_SPAN_LON = 0.30;
     const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
+
+    /**
+     * How many of a line's stop patterns to fetch in full when it is drawn.
+     * Each is one route-details request, serialised by the rate limiter, so
+     * this bounds the click-to-drawn latency; the search response fills in
+     * whatever the skipped patterns would have added anyway.
+     */
+    const DETAIL_FETCH_MAX = 4;
 
     /**
      * Decimal places in a map/trips segment polyline. This is MOTIS's default
@@ -533,10 +540,12 @@ const MotisApi = (() => {
         const stops = Array.isArray(data && data.stops) ? data.stops : [];
 
         routeCache.clear();
-        const trips = [];
 
         // Group the matching routes by the line they belong to: a search for
-        // "M10" should produce one M10, not one per stop sequence.
+        // "M10" should produce one M10, not one per stop sequence. Grouped by
+        // the route's own id rather than the printed name — two operators can
+        // both run something called M10, and pooling their segments would draw
+        // one line's arms onto the other.
         const lines = new Map();
         for (const info of infos) {
             let best = -1;
@@ -547,9 +556,6 @@ const MotisApi = (() => {
             }
             if (best < 0) continue;
 
-            // Grouped by the route's own id rather than by the name printed on
-            // it. Two operators can both run something called M10, and pooling
-            // their segments would draw one line's arms onto the other.
             const key = bestRoute.id || bestRoute.shortName || bestRoute.longName || query;
             if (!lines.has(key)) {
                 lines.set(key, {
@@ -569,50 +575,146 @@ const MotisApi = (() => {
             .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'de', { numeric: true }))
             .slice(0, MAX_LINE_RESULTS);
 
+        const trips = [];
         for (const line of ranked) {
             const product = productOf(line.infos[0].mode);
             const mode = line.infos[0].mode || '';
 
-            // --- the line as a whole ---
-            const edges = connectedCore(collectEdges(line.infos, polylines));
-            const chains = chainEdges(edges);
+            // The label comes from the long name — in GTFS usually the two
+            // termini ("Warschauer Str. <> Hauptbahnhof"). Assembling the real
+            // termini here would need the geometry this request deliberately no
+            // longer carries in full.
+            const direction = line.match.longName || '';
 
-            const shapes = [];
-            const allStops = [];
-            for (const chain of chains) {
-                const run = assembleFromSegments(chain, polylines, stops);
-                if (run.points.length < 2) continue;
-                shapes.push(toFeatureCollection(run.points, run.stops));
-                allStops.push(...run.stops);
-            }
-
-            if (shapes.length > 0) {
-                const ends = terminiOf(edges).map(i => (stops[i] && stops[i].name) || '').filter(Boolean);
-                // A ring has no ends; its long name is the only description of
-                // it there is.
-                const direction = ends.length >= 2
-                    ? `${ends[0]} \u2194 ${ends[ends.length - 1]}`
-                    : (line.match.longName || 'Ringlinie');
-
-                // Keyed by the route's id, not its name: two operators can
-                // both run an "M10", and keying by name made the second one
-                // overwrite the first, so picking one drew the other.
-                const id = `${ROUTE_ID_PREFIX}line:${line.key}`;
-                routeCache.set(id, {
-                    id, name: line.name, direction, product, mode,
-                    polyline: shapes[0],
-                    polylines: shapes,
-                    termini: terminiOf(edges)
-                        .map(i => stops[i])
-                        .filter(Boolean)
-                        .map(stop => ({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon }))
-                });
-                trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
-            }
-
+            const id = `${ROUTE_ID_PREFIX}line:${line.key}`;
+            routeCache.set(id, {
+                id, name: line.name, direction, product, mode,
+                // Everything needed to draw the whole line later: which
+                // patterns to fetch in full, and the partial data this search
+                // already returned as a fallback and a supplement.
+                routeIdxs: [...new Set(line.infos.map(info => info.routeIdx).filter(Number.isFinite))],
+                searchData: { routes: line.infos, polylines, stops }
+            });
+            trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
         }
 
         return { trips };
+    }
+
+    /** Full data for one stop pattern, by the index map/routes handed out. */
+    function fetchRouteDetails(routeIdx) {
+        const params = new URLSearchParams({ routeIdx: String(routeIdx), language: 'de' });
+        return call('/api/experimental/map/route-details', params);
+    }
+
+    /**
+     * Concatenate several {routes, polylines, stops} payloads into one, with
+     * every segment's indices remapped into the combined arrays.
+     */
+    function mergeRouteData(payloads) {
+        const stops = [];
+        const polylines = [];
+        const infos = [];
+
+        // The same physical stop appears in several payloads at different
+        // array positions. Indices are the graph's node identity, so they have
+        // to be unified — otherwise Alexanderplatz-from-payload-one and
+        // Alexanderplatz-from-payload-two are two unconnected nodes, the
+        // line's graph falls apart at every payload boundary, and the
+        // largest-connected-component filter throws most of the line away.
+        const canonical = new Map();
+        const stopIndex = (stop) => {
+            if (!stop) return -1;
+            const key = stop.stopId
+                || `${(+stop.lat).toFixed(5)},${(+stop.lon).toFixed(5)}`;
+            if (!canonical.has(key)) {
+                canonical.set(key, stops.length);
+                stops.push(stop);
+            }
+            return canonical.get(key);
+        };
+
+        for (const data of payloads) {
+            if (!data) continue;
+            const localStops = Array.isArray(data.stops) ? data.stops : [];
+            const polyBase = polylines.length;
+            polylines.push(...(Array.isArray(data.polylines) ? data.polylines : []));
+            for (const info of (Array.isArray(data.routes) ? data.routes : [])) {
+                infos.push({
+                    ...info,
+                    segments: (info.segments || []).map(segment => ({
+                        from: stopIndex(localStops[segment.from]),
+                        to: stopIndex(localStops[segment.to]),
+                        polyline: segment.polyline + polyBase
+                    })).filter(segment => segment.from >= 0 && segment.to >= 0)
+                });
+            }
+        }
+        return { infos, polylines, stops };
+    }
+
+    /**
+     * Pool a line's patterns into the drawn line: deduplicated hops, only the
+     * connected core, chained into as few runs as possible.
+     */
+    function assembleWholeLine(infos, polylines, stops) {
+        const edges = connectedCore(collectEdges(infos, polylines));
+        const chains = chainEdges(edges);
+
+        const shapes = [];
+        for (const chain of chains) {
+            const run = assembleFromSegments(chain, polylines, stops);
+            if (run.points.length < 2) continue;
+            shapes.push(toFeatureCollection(run.points, run.stops));
+        }
+
+        const termini = terminiOf(edges)
+            .map(i => stops[i])
+            .filter(Boolean)
+            .map(stop => ({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon }));
+
+        return { shapes, termini };
+    }
+
+    /**
+     * Draw data for a line picked from the search.
+     *
+     * The full geometry is fetched per stop pattern from route-details, which
+     * is not limited to any bounding box — this is what lets a line run past
+     * the edge of wherever the search happened to look. The search response's
+     * own partial data is merged in as well, so a pattern beyond
+     * DETAIL_FETCH_MAX, or a route-details endpoint that fails, degrades to
+     * what the search already knew instead of to nothing.
+     */
+    async function lineTrip(cached) {
+        if (!cached.assembled) {
+            const idxs = cached.routeIdxs.slice(0, DETAIL_FETCH_MAX);
+            if (cached.routeIdxs.length > idxs.length) {
+                console.info(`Line ${cached.name}: fetching ${idxs.length} of ${cached.routeIdxs.length} patterns in full.`);
+            }
+            const details = await Promise.allSettled(idxs.map(fetchRouteDetails));
+            const payloads = details
+                .filter(result => result.status === 'fulfilled')
+                .map(result => result.value);
+            if (payloads.length < idxs.length) {
+                console.warn(`Line ${cached.name}: ${idxs.length - payloads.length} route-details request(s) failed; drawing from search data.`);
+            }
+
+            const merged = mergeRouteData([...payloads, cached.searchData]);
+            const { shapes, termini } = assembleWholeLine(merged.infos, merged.polylines, merged.stops);
+            cached.assembled = { shapes, termini };
+        }
+
+        const { shapes, termini } = cached.assembled;
+        if (shapes.length === 0) return { trip: {} };
+        return { trip: {
+            id: cached.id,
+            line: { name: cached.name, product: cached.product, mode: cached.mode },
+            direction: cached.direction,
+            polyline: shapes[0],
+            polylines: shapes,
+            termini
+        } };
     }
 
     // ===== Endpoints =====
@@ -798,23 +900,11 @@ const MotisApi = (() => {
      * and the stop list both come out of that leg.
      */
     async function getTrip(tripId) {
-        // A line picked from the search is already drawn-and-ready; only an
-        // actual trip (a departure row, a journey leg) needs fetching.
+        // A line picked from the search: the search found it, this fetches it
+        // in full. Assembled once, then answered from memory on a re-click.
         if (String(tripId).startsWith(ROUTE_ID_PREFIX)) {
             const cached = routeCache.get(String(tripId));
-            if (cached) {
-                return { trip: {
-                    id: cached.id,
-                    line: { name: cached.name, product: cached.product, mode: cached.mode },
-                    direction: cached.direction,
-                    polyline: cached.polyline,
-                    // A line is not always one path — a ring, a branch and a
-                    // spur are all separate runs of the same line.
-                    polylines: cached.polylines || null,
-                    termini: cached.termini || null
-                } };
-            }
-            return { trip: {} };
+            return cached ? lineTrip(cached) : { trip: {} };
         }
 
         const params = new URLSearchParams({
