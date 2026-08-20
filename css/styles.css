@@ -664,6 +664,9 @@ input.walk-time-input {
 .map-line-search .search-result-item { gap: var(--space-2); justify-content: flex-start; }
 .map-line-search .search-results { width: 280px; }
 
+/* Controls carry a full label and a cramped one; compact mode swaps them. */
+.label-short { display: none; }
+
 .map-filters {
     display: flex;
     gap: var(--space-1);
@@ -1199,6 +1202,8 @@ input.walk-time-input {
 
 .map-status.is-warning { color: var(--warn); }
 
+.map-view { position: relative; }
+
 .map-container {
     position: relative;
     flex: 1;
@@ -1458,7 +1463,58 @@ body.kiosk-mode .display-header:hover .view-switch {
     .journey-results { padding: var(--space-2) var(--space-3) var(--space-4); gap: var(--space-2); }
     .journey-meta-row { padding: 0 var(--space-3) var(--space-2); }
     .journey-card { padding: var(--space-3); }
-    .map-toolbar { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
+    /* Map: the toolbar is the busiest row in the app - a heading, a search
+       field, a toggle, seven product chips, two buttons and a status line. At
+       full size it fitted one row; in a card it wrapped to four and took a
+       fifth of the box before any map was drawn. */
+    .map-toolbar {
+        padding: var(--space-2) var(--space-3);
+        gap: var(--space-2);
+        row-gap: var(--space-1);
+    }
+
+    .map-title {
+        font-size: var(--text-sm);
+        max-width: 40%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* 190px of fixed width is a luxury here; let the field take what is left. */
+    .map-line-search { width: auto; flex: 1 1 130px; min-width: 0; }
+
+    .map-toolbar .btn-ghost { padding: var(--space-1) var(--space-2); }
+    .label-long { display: none; }
+    .label-short { display: inline; }
+
+    /* The status line always claimed a row of its own (margin-left: auto).
+       Floated just below the toolbar it costs nothing: it is anchored to the
+       toolbar, which already sits above the map at z-index 1100, and the map's
+       top-right corner is the one Leaflet leaves free (zoom is top-left, the
+       attribution bottom-right). */
+    .map-status {
+        position: absolute;
+        top: calc(100% + var(--space-2));
+        right: var(--space-3);
+        left: auto;
+        margin-left: 0;
+        max-width: calc(100% - 90px);
+        padding: 2px var(--space-2);
+        border-radius: var(--radius-sm);
+        background: var(--surface-1);
+        background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+        border: 1px solid var(--line);
+        text-align: right;
+        pointer-events: none;
+    }
+
+    .map-status:empty { display: none; }
+
+    /* LED: the panel is a fixed 4:1 shape, so all the room it can use is
+       width - and the wall-display padding was eating 48px of it. */
+    .led-view { padding: var(--space-3); }
+    .led-frame { padding: var(--space-3); }
 }
 
 /* Narrow *and* short — a phone-sized card, the tightest case there is. */
@@ -1473,15 +1529,37 @@ body.kiosk-mode .display-header:hover .view-switch {
        row of departures each, and the layout is self-evident without them. */
     .split-pane .board-header { display: none; }
 
-    /* Keep the destination field, the star and the button on one line rather
-       than letting the star orphan onto a row of its own. */
-    .journey-controls { flex-direction: row; flex-wrap: wrap; align-items: flex-end; }
+    /* With several stations the tabs already name the one on screen, so the
+       header title only repeats it - truncated, at that ("U Weberw..."). */
+    body[data-view="single"]:has(#station-tabs:not(.hidden)) .station-name { display: none; }
+
+    /* Two rows, not four: origin on one line, then destination + star +
+       button sharing the next. "VON"/"NACH" go with them - the select reads
+       "Zuhause" and the field says "Ziel suchen", so the labels were spending
+       a row each to repeat their own controls. */
+    .journey-controls { flex-direction: row; flex-wrap: wrap; align-items: center; }
     .journey-endpoint { flex: 1 1 100%; min-width: 0; }
-    .journey-endpoint:last-of-type { flex: 1 1 auto; }
+    .journey-endpoint label { display: none; }
+    .journey-endpoint:last-of-type { flex: 1 1 90px; }
     .journey-fav { flex: 0 0 auto; }
-    .journey-controls .btn-primary { flex: 0 0 auto; }
+    .journey-controls .btn-primary { flex: 0 0 auto; padding: var(--space-2) var(--space-3); }
 
     .journey-walk-note { margin-left: 0; }
+
+    /* Two lines of controls fit once the buttons are down to their glyphs. */
+    .map-toolbar .btn-ghost {
+        min-width: 30px;
+        padding: var(--space-1);
+        text-align: center;
+    }
+
+    /* "Karte"/"Route" say nothing the view switcher has not already said; a
+       real heading (the line being shown) still earns its place. */
+    .map-title.is-default { display: none; }
+    .map-title { max-width: 90px; }
+
+    /* A 280px dropdown would hang off the edge of a phone-width card. */
+    .map-line-search .search-results { width: auto; }
 }
 
 /* ===== Reduced motion ===== */

@@ -685,7 +685,7 @@
             dom.mapLineResults.classList.add('hidden');
             TransitMap.setRoutes([]);
             TransitMap.setStops([]);
-            dom.mapTitle.textContent = 'Karte';
+            setMapTitle('');
             setMapFocus([]);
         });
 
@@ -1865,9 +1865,20 @@
         }] : []);
     }
 
+    /**
+     * The map's heading. "Karte" / "Route" are placeholders that say nothing the
+     * view switcher does not already say; flag them so a cramped toolbar can
+     * drop the heading and keep the controls on one line.
+     */
+    function setMapTitle(text) {
+        const label = (text || '').trim();
+        dom.mapTitle.textContent = label || 'Karte';
+        dom.mapTitle.classList.toggle('is-default', !label || label === 'Karte' || label === 'Route');
+    }
+
     function applyPendingMapScene() {
         if (!pendingMapScene) return;
-        dom.mapTitle.textContent = pendingMapScene.title || 'Karte';
+        setMapTitle(pendingMapScene.title);
         TransitMap.setRoutes(pendingMapScene.routes || []);
         TransitMap.setStops(pendingMapScene.stops || []);
         TransitMap.fit();
@@ -1883,7 +1894,7 @@
         // would be applied after the fetch resolves and wipe the route again.
         pendingMapScene = null;
         applyViewMode('map');
-        dom.mapTitle.textContent = label || 'Route';
+        setMapTitle(label || 'Route');
 
         const token = ++requestToken;
         setMapStatus('Route wird geladen…');
@@ -1901,7 +1912,7 @@
             }
 
             const stations = BvgApi.polylineStations(trip.polyline);
-            dom.mapTitle.textContent = label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim();
+            setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
             setMapFocus([(trip.line && trip.line.name) || '']);
             TransitMap.setRoutes([{
