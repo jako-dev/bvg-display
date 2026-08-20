@@ -23,20 +23,20 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 
 ### Features
 
-- **Real-time departures** from any BVG/VBB station
+- **Real-time departures** from any stop in Germany
 - **Multi-station** support with tabs
 - **Per-station walk time** — hides departures you can't reach in time (the lookahead window and result count are widened automatically so the board stays full)
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
 - **Journey planner** — from your "home" station *or a street address* to anywhere in the network, including places that aren't stops: "Markthalle 9" works as a destination, and the walks at both ends are planned as real legs
-- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Scroll off the loaded area and a button offers to reload vehicles for where you are looking. Falls back to a self-contained schematic when map tiles aren't reachable
 - **View switch in the header** — board, split, journey, map and LED, one click apart
 - **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
 - **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
 - **Auto-refresh** — configurable interval (10–120s)
-- **Data source selector** — BVG or VBB
+- **Data source selector** — Transitous (nationwide, the default), DB, BVG or VBB
 - **Installable** — add-to-home-screen / installable as a standalone app, with the app shell cached for offline startup (live departure data always requires a connection)
 - **Offline-capable settings** — all settings persisted in localStorage
 - **Preconfigured stations** — ship default stations with the deployment (`config.json`) or pass them per URL, so a client that has never set anything up still sees a full board — see [Preconfigured Stations](#preconfigured-stations)
