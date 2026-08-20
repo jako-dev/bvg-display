@@ -685,7 +685,7 @@
             dom.mapLineResults.classList.add('hidden');
             TransitMap.setRoutes([]);
             TransitMap.setStops([]);
-            dom.mapTitle.textContent = 'Karte';
+            setMapTitle('');
             setMapFocus([]);
         });
 
@@ -1333,6 +1333,10 @@
     // ===== View Mode =====
     function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
+        // Exposed for CSS: some chrome is redundant in some views and only
+        // worth hiding there (the app title means nothing in split view,
+        // where each pane is already labelled with its station).
+        document.body.dataset.view = mode;
         dom.viewSingle.classList.toggle('active', mode === 'single');
         dom.viewSplit.classList.toggle('active', mode === 'split');
         dom.viewJourney.classList.toggle('active', mode === 'journey');
@@ -1529,7 +1533,11 @@
     function renderJourneyControls() {
         const options = [];
         if (state.homeAddress) {
-            options.push(`<option value="${HOME_ADDRESS_VALUE}">🏠 Zuhause · ${escapeHtml(state.homeAddress.address)}</option>`);
+            // The label is often already "Zuhause" (a coordinate saved under
+            // that name), and "Zuhause · Zuhause" reads like a bug.
+            const addr = state.homeAddress.address || '';
+            const label = /^zuhause\b/i.test(addr) ? addr : `Zuhause · ${addr}`;
+            options.push(`<option value="${HOME_ADDRESS_VALUE}">🏠 ${escapeHtml(label)}</option>`);
         }
         for (const station of state.stations) {
             options.push(`<option value="${escapeHtml(station.id)}">${escapeHtml(station.name)}</option>`);
@@ -1857,9 +1865,20 @@
         }] : []);
     }
 
+    /**
+     * The map's heading. "Karte" / "Route" are placeholders that say nothing the
+     * view switcher does not already say; flag them so a cramped toolbar can
+     * drop the heading and keep the controls on one line.
+     */
+    function setMapTitle(text) {
+        const label = (text || '').trim();
+        dom.mapTitle.textContent = label || 'Karte';
+        dom.mapTitle.classList.toggle('is-default', !label || label === 'Karte' || label === 'Route');
+    }
+
     function applyPendingMapScene() {
         if (!pendingMapScene) return;
-        dom.mapTitle.textContent = pendingMapScene.title || 'Karte';
+        setMapTitle(pendingMapScene.title);
         TransitMap.setRoutes(pendingMapScene.routes || []);
         TransitMap.setStops(pendingMapScene.stops || []);
         TransitMap.fit();
@@ -1875,7 +1894,7 @@
         // would be applied after the fetch resolves and wipe the route again.
         pendingMapScene = null;
         applyViewMode('map');
-        dom.mapTitle.textContent = label || 'Route';
+        setMapTitle(label || 'Route');
 
         const token = ++requestToken;
         setMapStatus('Route wird geladen…');
@@ -1893,7 +1912,7 @@
             }
 
             const stations = BvgApi.polylineStations(trip.polyline);
-            dom.mapTitle.textContent = label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim();
+            setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
             setMapFocus([(trip.line && trip.line.name) || '']);
             TransitMap.setRoutes([{

@@ -664,6 +664,9 @@ input.walk-time-input {
 .map-line-search .search-result-item { gap: var(--space-2); justify-content: flex-start; }
 .map-line-search .search-results { width: 280px; }
 
+/* Controls carry a full label and a cramped one; compact mode swaps them. */
+.label-short { display: none; }
+
 .map-filters {
     display: flex;
     gap: var(--space-1);
@@ -1199,6 +1202,8 @@ input.walk-time-input {
 
 .map-status.is-warning { color: var(--warn); }
 
+.map-view { position: relative; }
+
 .map-container {
     position: relative;
     flex: 1;
@@ -1401,6 +1406,160 @@ body.kiosk-mode .display-header:hover .view-switch {
     .col-destination { font-size: var(--text-base); }
     .journey-controls { flex-direction: column; align-items: stretch; }
     .journey-arrow { display: none; }
+}
+
+/* =============================================================================
+   Compact mode — embedded in a short box
+
+   The app's usual home is a wall display. Inside a Home Assistant card it gets
+   a fixed, short viewport (a 10-row card is ~630px tall) on a phone-width
+   column, and the full-size chrome eats a third of it before a single
+   departure is drawn.
+
+   Keyed on viewport HEIGHT rather than width: an iPhone in landscape inside a
+   card is 836x632 — wide, but just as short as portrait, and it is the height
+   that decides how many rows fit.
+   ========================================================================== */
+@media (max-height: 760px) {
+    /* One header row instead of three: title, switch, settings. */
+    .display-header {
+        flex-wrap: nowrap;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+    }
+
+    .station-name { font-size: var(--text-md); }
+
+    /* The phone already shows a clock, and the app's own is to the pixel the
+       most expensive thing in the header. */
+    .clock { display: none; }
+
+    /* Fullscreen is meaningless inside an iframe. */
+    #kiosk-btn { display: none; }
+
+    .view-switch { order: 0; width: auto; margin-left: auto; }
+    .view-btn { flex: 0 0 auto; padding: var(--space-1) var(--space-2); }
+    .view-btn span { display: none; }
+
+    .btn-icon { width: 30px; height: 30px; }
+
+    /* "Letzte Aktualisierung" and the data source are reference information,
+       not something you read off a glanceable board. */
+    .display-footer { display: none; }
+
+    /* Tighter rows: the point of the card is how many departures fit. */
+    .departure-row { min-height: 44px; }
+    .col-departure { font-size: var(--text-md); }
+    .col-destination { font-size: var(--text-base); }
+    .board-header { padding-top: var(--space-1); padding-bottom: var(--space-1); }
+
+    .split-pane-header { padding: var(--space-2) var(--space-3); font-size: var(--text-base); }
+    .station-tabs { padding: var(--space-1) var(--space-3); }
+    .alerts-banner { padding: var(--space-1) var(--space-3); }
+
+    /* Journey: the controls were taking the whole card and leaving no room
+       for the connections they produce. */
+    .journey-controls { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
+    .journey-results { padding: var(--space-2) var(--space-3) var(--space-4); gap: var(--space-2); }
+    .journey-meta-row { padding: 0 var(--space-3) var(--space-2); }
+    .journey-card { padding: var(--space-3); }
+    /* Map: the toolbar is the busiest row in the app - a heading, a search
+       field, a toggle, seven product chips, two buttons and a status line. At
+       full size it fitted one row; in a card it wrapped to four and took a
+       fifth of the box before any map was drawn. */
+    .map-toolbar {
+        padding: var(--space-2) var(--space-3);
+        gap: var(--space-2);
+        row-gap: var(--space-1);
+    }
+
+    .map-title {
+        font-size: var(--text-sm);
+        max-width: 40%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* 190px of fixed width is a luxury here; let the field take what is left. */
+    .map-line-search { width: auto; flex: 1 1 130px; min-width: 0; }
+
+    .map-toolbar .btn-ghost { padding: var(--space-1) var(--space-2); }
+    .label-long { display: none; }
+    .label-short { display: inline; }
+
+    /* The status line always claimed a row of its own (margin-left: auto).
+       Floated just below the toolbar it costs nothing: it is anchored to the
+       toolbar, which already sits above the map at z-index 1100, and the map's
+       top-right corner is the one Leaflet leaves free (zoom is top-left, the
+       attribution bottom-right). */
+    .map-status {
+        position: absolute;
+        top: calc(100% + var(--space-2));
+        right: var(--space-3);
+        left: auto;
+        margin-left: 0;
+        max-width: calc(100% - 90px);
+        padding: 2px var(--space-2);
+        border-radius: var(--radius-sm);
+        background: var(--surface-1);
+        background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+        border: 1px solid var(--line);
+        text-align: right;
+        pointer-events: none;
+    }
+
+    .map-status:empty { display: none; }
+
+    /* LED: the panel is a fixed 4:1 shape, so all the room it can use is
+       width - and the wall-display padding was eating 48px of it. */
+    .led-view { padding: var(--space-3); }
+    .led-frame { padding: var(--space-3); }
+}
+
+/* Narrow *and* short — a phone-sized card, the tightest case there is. */
+@media (max-height: 760px) and (max-width: 620px) {
+    /* At this width the title only ever truncates to "Verbindun…" or
+       "BVG Abfa…", while the active view is already obvious from the switch
+       and each view labels its own content. The one exception is the single
+       board, where the title IS the station name and carries real meaning. */
+    body:not([data-view="single"]) .station-name { display: none; }
+
+    /* Two panes stacked in a 630px box: the repeated column headers cost a
+       row of departures each, and the layout is self-evident without them. */
+    .split-pane .board-header { display: none; }
+
+    /* With several stations the tabs already name the one on screen, so the
+       header title only repeats it - truncated, at that ("U Weberw..."). */
+    body[data-view="single"]:has(#station-tabs:not(.hidden)) .station-name { display: none; }
+
+    /* Two rows, not four: origin on one line, then destination + star +
+       button sharing the next. "VON"/"NACH" go with them - the select reads
+       "Zuhause" and the field says "Ziel suchen", so the labels were spending
+       a row each to repeat their own controls. */
+    .journey-controls { flex-direction: row; flex-wrap: wrap; align-items: center; }
+    .journey-endpoint { flex: 1 1 100%; min-width: 0; }
+    .journey-endpoint label { display: none; }
+    .journey-endpoint:last-of-type { flex: 1 1 90px; }
+    .journey-fav { flex: 0 0 auto; }
+    .journey-controls .btn-primary { flex: 0 0 auto; padding: var(--space-2) var(--space-3); }
+
+    .journey-walk-note { margin-left: 0; }
+
+    /* Two lines of controls fit once the buttons are down to their glyphs. */
+    .map-toolbar .btn-ghost {
+        min-width: 30px;
+        padding: var(--space-1);
+        text-align: center;
+    }
+
+    /* "Karte"/"Route" say nothing the view switcher has not already said; a
+       real heading (the line being shown) still earns its place. */
+    .map-title.is-default { display: none; }
+    .map-title { max-width: 90px; }
+
+    /* A 280px dropdown would hang off the edge of a phone-width card. */
+    .map-line-search .search-results { width: auto; }
 }
 
 /* ===== Reduced motion ===== */
