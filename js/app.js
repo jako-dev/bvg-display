@@ -2226,12 +2226,24 @@
      * nudge inside it changes nothing about what is on screen.
      */
     function updateReloadAreaOffer() {
-        const caps = TransitApi.getCapabilities();
-        const relevant = state.viewMode === 'map' && state.mapLive && caps.radar;
-        const view = relevant ? TransitMap.getBounds() : null;
+        dom.mapReloadArea.classList.toggle('hidden', !radarIsStale());
+        // Panning does not change the markers, but it does change whether the
+        // count still describes anything on screen.
+        refreshLiveNote();
+    }
 
-        const stale = !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
-        dom.mapReloadArea.classList.toggle('hidden', !stale);
+    /**
+     * Are the loaded vehicles from somewhere other than what is on screen?
+     *
+     * True once the view has left the box they were fetched for — which is both
+     * when to offer a reload and when the count on the status line stops
+     * describing anything the user can see.
+     */
+    function radarIsStale() {
+        const caps = TransitApi.getCapabilities();
+        if (state.viewMode !== 'map' || !state.mapLive || !caps.radar) return false;
+        const view = TransitMap.getBounds();
+        return !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
     }
 
     /** Grow a box by a fraction of its own span on every side. */
@@ -2295,15 +2307,28 @@
         TransitMap.setRoutes(list);
     }
 
-    function applyMapFilters() {
-        const focused = mapFocus && mapFocus.lines && mapFocus.lines.size > 0;
-        const vehicles = liveVehicles.filter(v => focused
+    /** Is the map currently narrowed to particular lines? */
+    const mapIsFocused = () => !!(mapFocus && mapFocus.lines && mapFocus.lines.size > 0);
+
+    /** The loaded vehicles that the current focus or product filter lets through. */
+    function filteredVehicles() {
+        const focused = mapIsFocused();
+        return liveVehicles.filter(v => focused
             ? mapFocus.lines.has(normaliseLine(v.label))
             : state.mapFilters[v.product] !== false);
+    }
 
+    function applyMapFilters() {
+        const vehicles = filteredVehicles();
         TransitMap.setVehicles(vehicles);
-        dom.mapFilters.classList.toggle('is-muted', !!focused);
-        updateLiveNote(focused, vehicles.length);
+        dom.mapFilters.classList.toggle('is-muted', mapIsFocused());
+        refreshLiveNote(vehicles.length);
+    }
+
+    /** Restate what "live" means without touching the markers. */
+    function refreshLiveNote(count) {
+        updateLiveNote(mapIsFocused(),
+            typeof count === 'number' ? count : filteredVehicles().length);
     }
 
     const normaliseLine = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -2322,9 +2347,22 @@
     function updateLiveNote(focused, count) {
         let live = '';
         if (state.mapLive && TransitApi.getCapabilities().radar) {
-            if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
-            else if (count > 0) live = `Live: ${count} Fahrzeuge`;
-            if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            if (radarIsStale()) {
+                // Reporting a count for vehicles that are all off screen reads
+                // as "they are here somewhere"; they are not, and the button
+                // over the map is what fixes it.
+                live = 'Fahrzeuge stammen aus einem anderen Bereich';
+            } else if (focused) {
+                live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (count > 0) {
+                live = `Live: ${count} Fahrzeuge`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (radarFetchedBounds) {
+                // A poll that found nothing is a fact worth stating: silence
+                // next to an empty map is indistinguishable from a failure.
+                live = 'Keine Fahrzeuge in diesem Bereich';
+            }
         } else if (!TransitApi.getCapabilities().radar && !mapHasRoutes) {
             // No live feed on this source, so an empty map is the normal state
             // rather than a failure — point at what does put something on it.
