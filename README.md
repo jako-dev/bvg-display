@@ -540,6 +540,18 @@ that, and what comes back is then an arbitrary slice that differs poll to poll â
 so the toolbar says *Ausschnitt* when the cap is reached. Zooming in narrows the
 bounding box and gets you a complete picture of a smaller area.
 
+A poll covers one bounding box â€” the map's own view widened by a quarter of its
+span on each side, so vehicles just off the edge are already loaded and a small
+pan does not blank them in. Scroll far enough that the view leaves that box and
+a **Fahrzeuge hier laden** button appears over the map; the vehicles on screen
+came from somewhere else, and without the offer an empty map reads as a bug
+rather than a boundary.
+
+The reload is a button rather than an automatic re-poll on every pan. Driving
+the fetch from map movement is what previously made a single click fire several
+requests, because a programmatic fit to a new route moves the map exactly as a
+drag does.
+
 ### Map tiles
 
 Map tiles come from OpenStreetMap by default. That is a shared, donated

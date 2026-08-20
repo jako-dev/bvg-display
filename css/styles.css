@@ -1230,6 +1230,33 @@ body[data-line-search="no"] .map-line-search { display: none; }
 
 .map-canvas { position: absolute; inset: 0; }
 
+/* Offered when the view has moved off the area the vehicles were fetched for.
+   Bottom-centre is the one edge Leaflet leaves alone — zoom sits top-left,
+   attribution bottom-right, and the status line top-right in compact mode. */
+.map-reload-area {
+    position: absolute;
+    left: 50%;
+    bottom: var(--space-4);
+    transform: translateX(-50%);
+    z-index: 600;             /* above Leaflet's panes (400) and controls (800 is the zoom UI) */
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text-1);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-bold);
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.map-reload-area:hover { background: var(--surface-3); }
+.map-reload-area[disabled] { opacity: 0.6; cursor: default; }
+
 .map-canvas-svg {
     display: flex;
     align-items: center;
@@ -1540,6 +1567,15 @@ body.kiosk-mode .display-header:hover .view-switch {
     }
 
     .map-status:empty { display: none; }
+
+    /* The card is short, so the button sits closer to the edge — but not on
+       top of Leaflet's attribution, which at this width the centred pill is
+       wide enough to reach. */
+    .map-reload-area {
+        bottom: calc(var(--space-2) + 18px);
+        padding: var(--space-1) var(--space-3);
+        font-size: var(--text-xs);
+    }
 
     /* LED: the panel is a fixed 4:1 shape, so all the room it can use is
        width - and the wall-display padding was eating 48px of it. */

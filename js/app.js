@@ -24,6 +24,8 @@
     // vehicles randomly appearing and vanishing, and like a journey's later
     // legs having no vehicles at all.
     const RADAR_MAX_VEHICLES = 256;
+    // Fraction of the viewport's own span added on each side of a radar query.
+    const RADAR_BOUNDS_MARGIN = 0.25;
     const MAX_FAVOURITES = 8;
 
     // ===== State =====
@@ -80,6 +82,9 @@
     let selectedJourney = -1;
     let radarTimer = null;
     let mapHasRoutes = false;
+    // The box the vehicles on screen were actually fetched for. Panning away
+    // from it is what makes the reload offer meaningful.
+    let radarFetchedBounds = null;
     let mapReady = false;
     let mapInitPromise = null;
     let shownRoute = null;   // { tripId, label } of the trip route on the map
@@ -171,6 +176,7 @@
         mapLineResults: document.getElementById('map-line-results'),
         mapFilters: document.getElementById('map-filters'),
         mapFit: document.getElementById('map-fit'),
+        mapReloadArea: document.getElementById('map-reload-area'),
         mapClear: document.getElementById('map-clear'),
         mapStatus: document.getElementById('map-status'),
         viewSwitch: document.getElementById('view-switch'),
@@ -672,8 +678,10 @@
             } else {
                 stopRadarTimer();
                 liveVehicles = [];
+                radarFetchedBounds = null;
                 TransitMap.setVehicles([]);
             }
+            updateReloadAreaOffer();
         });
         // Show any line's route by name — independent of the saved stations and
         // of what happens to be on screen.
@@ -715,6 +723,11 @@
         });
 
         dom.mapFit.addEventListener('click', () => TransitMap.fit());
+        dom.mapReloadArea.addEventListener('click', reloadRadarForView);
+
+        // Any settled move can make the offer relevant — a drag, a zoom, or
+        // flying to a route the user just picked.
+        TransitMap.onMoveEnd(() => updateReloadAreaOffer());
         dom.mapClear.addEventListener('click', () => {
             shownRoute = null;
             selectedJourney = -1;
@@ -1406,8 +1419,10 @@
             stopRadarTimer();
             liveVehicles = [];
             radarTruncated = false;
+            radarFetchedBounds = null;
             TransitMap.setVehicles([]);
         }
+        updateReloadAreaOffer();
 
         if (!caps.lineSearch) {
             dom.mapLineInput.value = '';
@@ -1526,6 +1541,8 @@
     // ===== View Mode =====
     function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
+        // The offer belongs to the map; it must not survive leaving it.
+        if (mode !== 'map') dom.mapReloadArea.classList.add('hidden');
         // Exposed for CSS: some chrome is redundant in some views and only
         // worth hiding there (the app title means nothing in split view,
         // where each pane is already labelled with its station).
@@ -2128,6 +2145,12 @@
     /**
      * Bounding box for the radar query. Prefers what the map is showing;
      * falls back to a box around the saved stations before the map has a size.
+     *
+     * The map's own box is widened by a margin rather than used as-is. That
+     * buys two things: vehicles just off the edge are already loaded, so a
+     * small pan does not blank them in, and the "these vehicles are from
+     * somewhere else" offer only appears once the view has genuinely left the
+     * area — with an exact box, nudging the map by a few pixels would trip it.
      */
     function radarBounds() {
         const points = [];
@@ -2136,7 +2159,7 @@
         }
 
         const mapBounds = TransitMap.getBounds && TransitMap.getBounds();
-        if (mapBounds) return mapBounds;
+        if (mapBounds) return padBounds(mapBounds, RADAR_BOUNDS_MARGIN);
         if (points.length === 0) return null;
 
         const lats = points.map(p => p[0]);
@@ -2177,13 +2200,65 @@
             // of it — worth saying, because the missing vehicles are otherwise
             // indistinguishable from ones that aren't running.
             radarTruncated = movements.length >= RADAR_MAX_VEHICLES;
+            radarFetchedBounds = bounds;
             liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
             applyMapFilters();
+            updateReloadAreaOffer();
             updateLastRefreshTime();
         } catch (e) {
             console.warn('Radar poll failed:', e.message);
             setMapStatus(`Live-Fahrzeuge nicht verfügbar: ${e.message}`, true);
         }
+    }
+
+    /**
+     * Offer to re-fetch when the map has been panned off the area the vehicles
+     * came from.
+     *
+     * The poll asks for one bounding box, so vehicles outside it were never in
+     * the answer — scrolling to a new part of the city shows an empty map that
+     * looks like a bug rather than a boundary. Rather than re-polling on every
+     * pan, which is what made a single click fire several requests the last
+     * time the map drove its own fetching, the user is offered the reload and
+     * decides.
+     *
+     * Shown only once the view has actually left the fetched box: a small
+     * nudge inside it changes nothing about what is on screen.
+     */
+    function updateReloadAreaOffer() {
+        const caps = TransitApi.getCapabilities();
+        const relevant = state.viewMode === 'map' && state.mapLive && caps.radar;
+        const view = relevant ? TransitMap.getBounds() : null;
+
+        const stale = !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
+        dom.mapReloadArea.classList.toggle('hidden', !stale);
+    }
+
+    /** Grow a box by a fraction of its own span on every side. */
+    function padBounds(bounds, fraction) {
+        const padLat = Math.abs(bounds.north - bounds.south) * fraction;
+        const padLon = Math.abs(bounds.east - bounds.west) * fraction;
+        return {
+            north: bounds.north + padLat, south: bounds.south - padLat,
+            east: bounds.east + padLon, west: bounds.west - padLon
+        };
+    }
+
+    /** Is `inner` entirely within `outer`? A hair of tolerance for rounding. */
+    function containsBounds(outer, inner) {
+        const e = 1e-6;
+        return inner.north <= outer.north + e && inner.south >= outer.south - e
+            && inner.east <= outer.east + e && inner.west >= outer.west - e;
+    }
+
+    async function reloadRadarForView() {
+        dom.mapReloadArea.disabled = true;
+        try {
+            await fetchRadar();
+        } finally {
+            dom.mapReloadArea.disabled = false;
+        }
+        updateReloadAreaOffer();
     }
 
     /**
