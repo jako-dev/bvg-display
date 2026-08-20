@@ -480,10 +480,14 @@ app renders. Two things there are worth knowing:
   which is in force.
 - MOTIS holds one line as **several routes** — one per distinct stop sequence,
   so each direction and every short working is its own entry. Drawing any one
-  of them draws part of the line. The search pools their segments and
-  deduplicates the shared hops, so the first hit for "M10" is the whole line;
-  the individual routes follow under a divider, since a branch or a short
-  working is a real thing to want to see.
+  of them draws part of the line. The search pools their segments,
+  deduplicates the shared hops and offers **one row per line**, drawn end to
+  end. Pooling is keyed on the route's own id rather than the name printed on
+  it: two operators can both run an "M10", and pooling by name drew one line's
+  arms onto the other.
+- Hops not connected to the rest of the line are dropped — a depot spur kept as
+  its own pattern, a corridor left over from an old routing. A line is one
+  connected thing, so only its largest connected group of hops is drawn.
 - A line is **not always one path**. RNV 5 in Mannheim is a ring, and plenty of
   lines have a branch or a spur, so the pooled hops are chained into as few
   continuous runs as possible and every one of them is drawn — reducing a line
@@ -583,6 +587,20 @@ It also clears the line focus. While a line or a connection is shown, live
 vehicles are narrowed to it — so somewhere that line does not run, a reload
 would fetch a full response and draw none of it. The route stays on the map;
 the narrowing does not.
+
+#### What this does not do
+
+A line's own data still holds more than the line most people mean: branches and
+short workings are drawn along with the trunk, because nothing in `map/routes`
+says which is which. Telling them apart properly needs trip frequencies — how
+many services actually run each pattern — which this endpoint does not carry.
+Two heuristics were tried and both made it worse: the longest walk through the
+hops cuts a ring in half, and preferring the straightest continuation at a
+junction follows a branch wherever the line doubles back on itself.
+
+Long-distance services are a harder limit. The search is a bounding box of at
+most ~55 × 60 km, so an ICE running Hamburg to Munich can never be drawn whole
+however far you zoom out. This is a map view of local and regional lines.
 
 ### Line colours
 
