@@ -700,6 +700,21 @@
             lineTimeout = setTimeout(() => searchMapLine(query), LINE_DEBOUNCE_MS);
         });
 
+        // Clicking the map — to pan or zoom while deciding — hides the
+        // dropdown via the document-level close-on-outside-click above, and
+        // nothing used to bring it back: the input event only fires when the
+        // text changes, and it hadn't. Focusing the field again re-shows what
+        // the last search found, or re-runs it if there is nothing to show.
+        dom.mapLineInput.addEventListener('focus', () => {
+            const query = dom.mapLineInput.value.trim();
+            if (!query) return;
+            if (dom.mapLineResults.children.length > 0) {
+                dom.mapLineResults.classList.remove('hidden');
+            } else {
+                searchMapLine(query);
+            }
+        });
+
         dom.mapLineInput.addEventListener('keydown', (e) => {
             if (e.key !== 'Enter') return;
             clearTimeout(lineTimeout);
