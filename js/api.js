@@ -66,7 +66,10 @@ const TransitApi = (() => {
             area: 'Deutschland und Nachbarl\u00e4nder',
             dialect: 'motis',
             radar: true,
-            lineSearch: false,
+            lineSearch: true,
+            // MOTIS has no search-by-name endpoint; the line lookup reads the
+            // routes around what is on screen instead of the whole network.
+            lineSearchScope: 'map',
             geocoder: 'builtin',
             radarIntervalMs: 30000,
             attribution: {
@@ -155,7 +158,7 @@ const TransitApi = (() => {
         if (!entry) {
             return {
                 label: '', area: '', dialect: 'hafas-rest', radar: false,
-                lineSearch: false, geocoder: 'external',
+                lineSearch: false, lineSearchScope: 'network', geocoder: 'external',
                 radarIntervalMs: DEFAULT_RADAR_INTERVAL_MS, attribution: null
             };
         }
@@ -165,6 +168,7 @@ const TransitApi = (() => {
             dialect: entry.dialect || 'hafas-rest',
             radar: !!entry.radar,
             lineSearch: !!entry.lineSearch,
+            lineSearchScope: entry.lineSearchScope || 'network',
             geocoder: entry.geocoder || 'external',
             radarIntervalMs: entry.radarIntervalMs || DEFAULT_RADAR_INTERVAL_MS,
             attribution: entry.attribution || null
@@ -539,6 +543,8 @@ const TransitApi = (() => {
      */
     async function searchTripsByLine(lineName, opt = {}) {
         assertSupported('lineSearch');
+        if (isMotis()) return MotisApi.searchTripsByLine(lineName, opt);
+
         const params = new URLSearchParams({
             lineName: String(lineName).trim(),
             onlyCurrentlyRunning: 'true',

@@ -1412,6 +1412,10 @@
         if (!caps.lineSearch) {
             dom.mapLineInput.value = '';
             dom.mapLineResults.classList.add('hidden');
+        } else {
+            dom.mapLineInput.placeholder = caps.lineSearchScope === 'map'
+                ? 'Linie im Ausschnitt, z.B. M10'
+                : 'Linie anzeigen, z.B. M10';
         }
 
         // Some sources index addresses and points of interest themselves, so
@@ -2270,13 +2274,32 @@
      * is why a line that happens not to be running past you was missing from
      * the old picker. /trips searches by line name across the whole network.
      */
+    /**
+     * Why a line was not found, which depends on how the backend looks.
+     * A network-wide search misses a line that is not running; a map-scoped one
+     * misses a line that is not near what you are looking at, and panning or
+     * zooming out fixes that.
+     */
+    function lineMissHtml(query) {
+        const scoped = TransitApi.getCapabilities().lineSearchScope === 'map';
+        return `Keine Linie „${escapeHtml(query)}" ${scoped
+            ? 'in diesem Kartenausschnitt. Karte verschieben oder herauszoomen.'
+            : 'gefunden (fährt sie gerade?)'}`;
+    }
+
     async function searchMapLine(query) {
         if (!TransitApi.getCapabilities().lineSearch) return;
         dom.mapLineResults.innerHTML = '<div class="search-result-item">Suche&hellip;</div>';
         dom.mapLineResults.classList.remove('hidden');
 
         try {
-            const data = await TransitApi.searchTripsByLine(query, { results: 30 });
+            const data = await TransitApi.searchTripsByLine(query, {
+                results: 30,
+                // A map-scoped backend needs to know what is on screen; a
+                // network-wide one ignores both and searches everything.
+                bounds: TransitMap.getBounds(),
+                zoom: TransitMap.getZoom()
+            });
             const trips = Array.isArray(data.trips) ? data.trips : [];
 
             // One entry per direction, not per running vehicle: the point is
@@ -2298,7 +2321,8 @@
             }
 
             if (directions.length === 0) {
-                dom.mapLineResults.innerHTML = `<div class="search-result-item">Keine Linie „${escapeHtml(query)}" gefunden (fährt sie gerade?)</div>`;
+                dom.mapLineResults.innerHTML =
+                    `<div class="search-result-item">${lineMissHtml(query)}</div>`;
                 return;
             }
 

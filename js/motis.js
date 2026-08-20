@@ -59,6 +59,23 @@ const MotisApi = (() => {
     let baseUrl = '';
 
     /**
+     * Assembled routes from the last line search, keyed by a synthetic ID.
+     *
+     * map/routes answers the search *and* carries the geometry, so drawing the
+     * line the user picked needs no second request — the shape is already here.
+     * Cleared on each new search; the only IDs the UI can hand back are the
+     * ones the current search just produced.
+     */
+    const routeCache = new Map();
+    const ROUTE_ID_PREFIX = 'motis-route:';
+
+    /** How far around the map centre a line search looks. */
+    const SEARCH_MIN_SPAN = 0.06;   // ~7 km — a zoomed-in view still finds things
+    const SEARCH_MAX_SPAN_LAT = 0.32;
+    const SEARCH_MAX_SPAN_LON = 0.55;   // together, comfortably a whole city
+    const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
+
+    /**
      * @param {{fetchJson: function(string): Promise<Object>, baseUrl: string}} opt
      *        The fetcher is injected so rate limiting, retries and the outage
      *        diagnostics in api.js apply here too.
@@ -223,6 +240,144 @@ const MotisApi = (() => {
         const modes = on.flatMap(product => PRODUCT_TO_MODES[product] || []);
         // Everything off means everything off — not "no filter".
         return modes.length ? modes.join(',') : 'WALK';
+    }
+
+    // ===== Line lookup =====
+
+    const normalise = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+
+    /**
+     * Clamp a viewport to the area a line search should cover.
+     *
+     * Too small and a line running one street over is invisible; too large and
+     * the response is every bus route in the state. Both bounds are applied
+     * around the centre of what the user is actually looking at.
+     */
+    function searchBox(bounds) {
+        const centreLat = (bounds.north + bounds.south) / 2;
+        const centreLon = (bounds.east + bounds.west) / 2;
+        const spanLat = Math.min(SEARCH_MAX_SPAN_LAT,
+            Math.max(SEARCH_MIN_SPAN, Math.abs(bounds.north - bounds.south)));
+        const spanLon = Math.min(SEARCH_MAX_SPAN_LON,
+            Math.max(SEARCH_MIN_SPAN, Math.abs(bounds.east - bounds.west)));
+        return {
+            south: centreLat - spanLat / 2, north: centreLat + spanLat / 2,
+            west: centreLon - spanLon / 2, east: centreLon + spanLon / 2
+        };
+    }
+
+    /**
+     * Stitch a route's segments into one path.
+     *
+     * A polyline is shared between every route that runs over that stretch, so
+     * it is stored in one direction only and may be the wrong way round for
+     * this one. Each segment is oriented against the stop it starts from before
+     * being appended, otherwise the drawn line doubles back on itself.
+     */
+    function assembleRoute(info, polylines, stops) {
+        const points = [];
+        const routeStops = [];
+
+        for (const segment of info.segments || []) {
+            const shared = polylines[segment.polyline];
+            const from = stops[segment.from];
+            const to = stops[segment.to];
+            if (!shared || !shared.polyline) continue;
+
+            let leg = decodePolyline(shared.polyline.points, shared.polyline.precision || 5);
+            if (leg.length >= 2 && from && isFinite(from.lat)) {
+                const head = leg[0], tail = leg[leg.length - 1];
+                const near = (p) => Math.abs(p[0] - from.lat) + Math.abs(p[1] - from.lon);
+                if (near(tail) < near(head)) leg = leg.slice().reverse();
+            }
+
+            // The join between two segments is the same stop twice over.
+            if (points.length && leg.length && points[points.length - 1][0] === leg[0][0]
+                && points[points.length - 1][1] === leg[0][1]) leg = leg.slice(1);
+
+            points.push(...leg);
+            if (from) routeStops.push(from);
+            if (to) routeStops.push(to);
+        }
+
+        // Stops repeat at every segment join.
+        const seen = new Set();
+        const uniqueStops = [];
+        for (const stop of routeStops) {
+            const key = stop.stopId || `${stop.lat},${stop.lon}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniqueStops.push({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon });
+        }
+
+        return { points, stops: uniqueStops };
+    }
+
+    /**
+     * Find a line by name and return one entry per matching route.
+     *
+     * Unlike the transport.rest search this is geographic rather than
+     * network-wide — MOTIS has no search-by-name endpoint — so it covers the
+     * area around what is on screen. It reads the scheduled route rather than a
+     * running vehicle, which means a line that is not currently operating still
+     * draws.
+     *
+     * @param {string} query
+     * @param {{bounds: Object, zoom: number, results: number}} opt
+     * @returns {Promise<{trips: Array}>} shaped like the transport.rest result
+     */
+    async function searchTripsByLine(query, opt = {}) {
+        const wanted = normalise(query);
+        if (!wanted || !opt.bounds) return { trips: [] };
+
+        const box = searchBox(opt.bounds);
+        const zoom = Math.max(SEARCH_MIN_ZOOM, Math.min(Math.round(opt.zoom || SEARCH_MIN_ZOOM), 16));
+
+        const params = new URLSearchParams({
+            zoom: String(zoom),
+            min: `${box.south},${box.west}`,
+            max: `${box.north},${box.east}`,
+            language: 'de'
+        });
+
+        const data = await call('/api/experimental/map/routes', params);
+        const infos = Array.isArray(data && data.routes) ? data.routes : [];
+        const polylines = Array.isArray(data && data.polylines) ? data.polylines : [];
+        const stops = Array.isArray(data && data.stops) ? data.stops : [];
+
+        routeCache.clear();
+        const trips = [];
+        const seen = new Set();
+
+        for (let i = 0; i < infos.length; i++) {
+            const info = infos[i];
+            const match = (info.transitRoutes || []).find(r =>
+                normalise(r.shortName) === wanted || normalise(r.longName) === wanted);
+            if (!match) continue;
+
+            const assembled = assembleRoute(info, polylines, stops);
+            if (assembled.points.length < 2) continue;
+
+            const last = assembled.stops[assembled.stops.length - 1];
+            const direction = (last && last.name) || match.longName || '';
+            const key = `${match.shortName}|${direction}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            const id = `${ROUTE_ID_PREFIX}${i}`;
+            const name = match.shortName || match.longName || query;
+            routeCache.set(id, {
+                id, name, direction,
+                product: productOf(info.mode),
+                mode: info.mode || '',
+                polyline: toFeatureCollection(assembled.points, assembled.stops)
+            });
+
+            trips.push({ id, line: { name, product: productOf(info.mode) }, direction });
+            if (opt.results && trips.length >= opt.results) break;
+        }
+
+        return { trips };
     }
 
     // ===== Endpoints =====
@@ -408,6 +563,21 @@ const MotisApi = (() => {
      * and the stop list both come out of that leg.
      */
     async function getTrip(tripId) {
+        // A line picked from the search is already drawn-and-ready; only an
+        // actual trip (a departure row, a journey leg) needs fetching.
+        if (String(tripId).startsWith(ROUTE_ID_PREFIX)) {
+            const cached = routeCache.get(String(tripId));
+            if (cached) {
+                return { trip: {
+                    id: cached.id,
+                    line: { name: cached.name, product: cached.product, mode: cached.mode },
+                    direction: cached.direction,
+                    polyline: cached.polyline
+                } };
+            }
+            return { trip: {} };
+        }
+
         const params = new URLSearchParams({
             tripId: String(tripId),
             detailedLegs: 'true',
@@ -545,6 +715,7 @@ const MotisApi = (() => {
         isMotisId,
         decodePolyline,
         searchPlaces,
+        searchTripsByLine,
         getDepartures,
         getStation,
         getJourneys,

@@ -429,7 +429,7 @@ Uses the public [transport.rest](https://transport.rest/) endpoints and
 
 | Endpoint | Coverage | Live vehicles | Search by line |
 |----------|----------|---------------|----------------|
-| `api.transitous.org` **(default)** | Germany and neighbours | yes | no |
+| `api.transitous.org` **(default)** | Germany and neighbours | yes | yes, map-scoped |
 | `v6.db.transport.rest` | Germany (DB) | no | no |
 | `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
 | `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
@@ -462,6 +462,15 @@ app renders. Two things there are worth knowing:
 - `map/trips` returns trip *segments* with a departure, an arrival and a shape,
   not vehicle positions. A position is interpolated along the shape for the
   current moment, the way MOTIS's own map does it.
+- There is no search-by-line-name endpoint, so the line lookup reads
+  `map/routes` — every route in a box around what is on screen — and filters by
+  name locally. That makes it **map-scoped rather than network-wide**: a line
+  running on the other side of the country is not found until you pan there.
+  In exchange it draws the *scheduled* route rather than a running vehicle's
+  track, so a line that is not operating right now still shows where it goes.
+  `getCapabilities().lineSearchScope` is `'map'` there and `'network'` on the
+  transport.rest endpoints; the field's placeholder and its empty state say
+  which is in force.
 
 Rather than let unsupported calls fail, each provider declares what it supports
 in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
