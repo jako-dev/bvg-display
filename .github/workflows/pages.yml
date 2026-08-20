@@ -2,8 +2,8 @@ name: Deploy Web App
 
 # Publishes the web app to the `gh-pages` branch, which GitHub Pages serves.
 #
-#   main            -> https://jako-dev.github.io/bvg-display/
-#   any branch      -> https://jako-dev.github.io/bvg-display/preview/<branch>/
+#   main            -> https://jako-dev.github.io/abfahrtsmonitor/
+#   any branch      -> https://jako-dev.github.io/abfahrtsmonitor/preview/<branch>/
 #
 # Both live at the same time, so previewing a branch never takes the demo down.
 # To publish a branch: Actions -> Deploy Web App -> Run workflow -> pick the

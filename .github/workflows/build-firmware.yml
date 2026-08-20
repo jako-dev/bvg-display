@@ -56,17 +56,17 @@ jobs:
         working-directory: esp32
 
       - name: Rename firmware binary
-        run: cp esp32/.pio/build/esp32dev/firmware.bin bvg-display.bin
+        run: cp esp32/.pio/build/esp32dev/firmware.bin abfahrtsmonitor.bin
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bvg-display-firmware
-          path: bvg-display.bin
+          name: abfahrtsmonitor-firmware
+          path: abfahrtsmonitor.bin
           if-no-files-found: error
 
       - name: Upload firmware to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: bvg-display.bin
+          files: abfahrtsmonitor.bin

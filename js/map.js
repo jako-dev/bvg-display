@@ -552,6 +552,15 @@ const TransitMap = (() => {
         };
     }
 
+    /**
+     * Current zoom, for backends that use it to decide how much to send.
+     * Null on the schematic fallback, where there is no tile pyramid.
+     * @returns {number|null}
+     */
+    function getZoom() {
+        return (mode === 'leaflet' && map) ? map.getZoom() : null;
+    }
+
     /** Recompute layout after the container changed size (view switch, resize). */
     function refresh() {
         if (mode === 'leaflet' && map) map.invalidateSize();
@@ -584,6 +593,7 @@ const TransitMap = (() => {
     return {
         init,
         getBounds,
+        getZoom,
         setRoutes,
         setStops,
         setPins,

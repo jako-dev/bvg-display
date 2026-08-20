@@ -1,10 +1,10 @@
-# BVG Abfahrtsmonitor
+# Abfahrtsmonitor
 
-A real-time departure display for Berlin public transport (BVG/VBB), available as a **web app** and as **ESP32 LED matrix display** firmware.
+A real-time departure display for German public transport, available as a **web app** and as **ESP32 LED matrix display** firmware. Departure boards, journey planning and a live route map, on any stop in Germany — with Berlin-specific data sources still selectable.
 
 Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic).
 
-**[Live Demo →](https://jako-dev.github.io/bvg-display/)**
+**[Live Demo →](https://jako-dev.github.io/abfahrtsmonitor/)**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -43,7 +43,7 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 
 ### Quick Start
 
-Open the [live version](https://jako-dev.github.io/bvg-display/) or run locally:
+Open the [live version](https://jako-dev.github.io/abfahrtsmonitor/) or run locally:
 
 ```bash
 python3 -m http.server 8080
@@ -94,7 +94,7 @@ that has **not** configured its own stations starts with what is listed here:
 |-----|-------------|
 | `stations` | Default stations. `name` and `walkTime` are optional — a missing name is looked up from the API on first load |
 | `lock` | `true` makes this file win over the client's own saved settings — for dedicated wall displays that must always show the same stations |
-| `apiProvider` | `v6.bvg.transport.rest` or `v6.vbb.transport.rest` |
+| `apiProvider` | `v6.bvg.transport.rest`, `v6.vbb.transport.rest`, `v6.db.transport.rest` or `api.transitous.org` |
 | `departureCount` | 1–15 |
 | `refreshInterval` | 10–120 seconds |
 | `theme` | `dark` or `modern` |
@@ -122,7 +122,7 @@ localStorage, so embedding the board somewhere never overwrites the settings
 that browser already has.
 
 ```
-https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1
+https://jako-dev.github.io/abfahrtsmonitor/?stop=900100003:4&stop=900120005&view=split&kiosk=1
 ```
 
 | Parameter | Alias | Example |
@@ -134,7 +134,7 @@ https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=spl
 | `theme` | — | `theme=modern` |
 | `count` | `departures` | `count=9` |
 | `refresh` | `interval` | `refresh=45` |
-| `provider` | `source` | `provider=v6.vbb.transport.rest` |
+| `provider` | `source` | `provider=v6.db.transport.rest` |
 | `filter` | `filters` | `filter=subway,tram` (everything else off) |
 | `scroll` / `scrollSpeed` | — | `scroll=0`, `scrollSpeed=5000` |
 | `left` / `right` | — | Station IDs for the split panes |
@@ -186,7 +186,7 @@ status — which looks like a bug in this app and is not.
 The app handles it: requests are retried once, the board keeps showing the last
 departures it loaded (dimmed, with the time they were fetched) instead of
 blanking, and it offers to switch to the other endpoint — BVG and VBB are
-separately hosted and both cover Berlin, so one being down rarely means both.
+separately hosted, so one being down rarely means the next one is.
 
 ### Showing a line
 
@@ -221,7 +221,7 @@ Because the config travels in the URL, no per-client setup is needed — add a
 ```yaml
 type: iframe
 url: >-
-  https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
+  https://jako-dev.github.io/abfahrtsmonitor/?stop=900100003:4&stop=900120005&view=split&kiosk=1&theme=modern&refresh=60
 aspect_ratio: 50%
 ```
 
@@ -239,8 +239,8 @@ serves:
 
 | Source | URL |
 |--------|-----|
-| `main` (on every push) | `https://jako-dev.github.io/bvg-display/` |
-| any branch (on demand) | `https://jako-dev.github.io/bvg-display/preview/<branch>/` |
+| `main` (on every push) | `https://jako-dev.github.io/abfahrtsmonitor/` |
+| any branch (on demand) | `https://jako-dev.github.io/abfahrtsmonitor/preview/<branch>/` |
 
 Both are live at the same time, so previewing a branch never takes the demo
 down. `/preview/` lists whatever is currently published.
@@ -290,7 +290,7 @@ The `esp32/` directory contains firmware for a physical departure display using 
 - **Automatic rollback** — if a firmware update breaks WiFi, auto-reverts to last known good
 - **Night mode** — scheduled display off (e.g. 22:00–06:00)
 - **Adjustable brightness**
-- **mDNS** — accessible at `http://bvg-display.local`
+- **mDNS** — accessible at `http://abfahrtsmonitor.local`
 - **Watchdog** — auto-reboot on hang
 - **Factory reset** — via web UI or hold BOOT button 5 seconds
 - **Stale data indicator** — blinking red dot when API hasn't responded in >5 min
@@ -349,15 +349,15 @@ pio device monitor --baud 115200
 
 ### First-Time Setup
 
-1. Power on → ESP32 creates WiFi AP **"BVG-Display"** (open)
+1. Power on → ESP32 creates WiFi AP **"Abfahrtsmonitor"** (open)
 2. Connect with phone/laptop → captive portal opens
 3. Enter WiFi credentials → device connects to your network
-4. Access config at `http://bvg-display.local` or the device IP
+4. Access config at `http://abfahrtsmonitor.local` or the device IP
 5. Add stations → LED matrix shows departures
 
 ### OTA Updates
 
-When a new [GitHub Release](https://github.com/jako-dev/bvg-display/releases) is published:
+When a new [GitHub Release](https://github.com/jako-dev/abfahrtsmonitor/releases) is published:
 1. Open the device config page
 2. Click "Nach Updates suchen" in the Firmware section
 3. Click "Update installieren"
@@ -388,7 +388,7 @@ All runtime settings are adjustable from the config page — no reflashing neede
 ## Project Structure
 
 ```
-bvg-display/
+abfahrtsmonitor/
 ├── index.html              # Web app entry
 ├── config.json             # Optional deployment defaults (preset stations)
 ├── manifest.json           # PWA manifest (install as app)
@@ -424,14 +424,83 @@ bvg-display/
 
 Uses the public [transport.rest](https://transport.rest/) APIs:
 
-| Endpoint | Coverage |
-|----------|----------|
-| `v6.bvg.transport.rest` | Berlin (BVG) |
-| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) |
+Uses the public [transport.rest](https://transport.rest/) endpoints and
+[Transitous](https://transitous.org/):
 
-- No API key required
-- Rate limit: ~100 requests/minute
+| Endpoint | Coverage | Live vehicles | Search by line |
+|----------|----------|---------------|----------------|
+| `api.transitous.org` **(default)** | Germany and neighbours | yes | no |
+| `v6.db.transport.rest` | Germany (DB) | no | no |
+| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
+| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
+
+Transitous is the default because a client that has never been configured has
+no way to say where it is, and a Berlin-only source is wrong everywhere else.
+A browser that has already picked a source keeps its choice — the saved setting
+is restored over the default. Berlin users who want line search should select
+BVG or VBB.
+
+Live vehicles poll every 30 seconds on every source. `radarIntervalMs` in
+`PROVIDERS` can slow an individual one further; nothing polls faster.
+
+- No API key required, no registration
 - CORS enabled (browser-friendly)
+
+The three transport.rest endpoints speak one request and response shape;
+switching between them is a base-URL swap. They are not the same backend,
+though: BVG and VBB are HAFAS deployments, while the DB one was migrated to
+`db-vendo-client` after Deutsche Bahn retired its HAFAS endpoint, and that
+client has no equivalent for `/radar` or `/trips?lineName=`.
+
+Transitous is a different system again — a community-run
+[MOTIS](https://github.com/motis-project/motis) instance — and is translated in
+`js/motis.js`, which maps its vocabulary onto the same objects the rest of the
+app renders. Two things there are worth knowing:
+
+- Its geocoder returns stops, points of interest and addresses from one index,
+  so the separate Photon lookup is switched off while it is selected.
+- `map/trips` returns trip *segments* with a departure, an arrival and a shape,
+  not vehicle positions. A position is interpolated along the shape for the
+  current moment, the way MOTIS's own map does it.
+
+Rather than let unsupported calls fail, each provider declares what it supports
+in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
+unsupported endpoint are refused before a request goes out, and
+`applyProviderCapabilities()` (`js/app.js`) hides the map controls that depend
+on them. Departure boards, journey planning, station and place search and route
+shapes work on every source.
+
+### Station IDs are not portable
+
+transport.rest uses bare numeric HAFAS IDs (`900120025`); MOTIS uses the source
+dataset's ID behind a feed tag (`de-DELFI_de:11000:900120025`). A board saved
+against one shows nothing at all against the other, so switching source
+re-resolves each saved station by the name it was stored under
+(`remapStationsForProvider()` in `js/app.js`). Names and walking times are kept;
+only IDs change. A station with no counterpart is dropped and named in a
+message rather than left in the list loading nothing.
+
+This also runs at startup, so a `config.json` or a URL that names BVG IDs works
+when pointed at another source.
+
+### Using Transitous
+
+Transitous is donated infrastructure. Its [usage
+policy](https://transitous.org/api/) sets conditions this app already meets in
+part, and one it cannot meet for you:
+
+- **Attribution.** A link to `https://transitous.org/sources/` is shown in the
+  footer whenever Transitous is the selected source — including inside a short
+  embedded card, where the rest of the footer is hidden.
+- **Polling.** Live vehicles poll every 30 s, and Transitous pins that value
+  rather than inheriting the default, so raising the default later will not
+  quietly speed it up. The policy asks you to get in touch before making many
+  requests; if you run this on a wall display all day, do that.
+- **Contact information.** A browser app cannot set a `User-Agent`, so the
+  policy accepts the `Referer` header instead — on the condition that the site
+  carries contact information. **If you deploy this with Transitous enabled,
+  add a way to reach you** (a repository link or an email in the footer or
+  README of your deployment). This repository does not add one for you.
 
 Endpoints used:
 
@@ -480,7 +549,7 @@ missing.
 |---------|----------|
 | Panel stays dark | Check 5V power; verify shared GND with ESP32 |
 | Garbled display | Recheck HUB75 wiring, no loose jumpers |
-| Can't find "BVG-Display" AP | Reflash; hold BOOT during upload |
+| Can't find "Abfahrtsmonitor" AP | Reflash; hold BOOT during upload |
 | Upload fails | Hold BOOT when upload starts; lower `upload_speed` |
 | No departures | Check serial monitor; BVG API may be temporarily down |
 | Blinking red dot | API stale >5 min — check WiFi and internet connectivity |

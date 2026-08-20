@@ -1,24 +1,94 @@
 /**
  * Transport API Module
  * Handles all communication with the transport.rest API
- * Supports BVG (Berlin) and VBB (Berlin + Brandenburg)
+ * Supports Transitous (MOTIS) and the transport.rest endpoints for DB, BVG and VBB.
  */
-const BvgApi = (() => {
+const TransitApi = (() => {
     'use strict';
 
+    /**
+     * The endpoints this app can talk to, and what each of them can actually do.
+     *
+     * All three speak the same request/response shape, so switching is a base-URL
+     * swap — but they are not the same backend underneath. BVG and VBB are HAFAS
+     * deployments and answer the whole surface. The DB one was migrated off
+     * HAFAS after Deutsche Bahn retired that endpoint, and its replacement has
+     * no equivalent for two of the calls this app makes:
+     *
+     *   radar      /radar            live vehicle positions in a bounding box
+     *   lineSearch /trips?lineName=  find a line anywhere in the network
+     *
+     * Those are declared per provider rather than discovered, so the UI can hide
+     * what a provider cannot do instead of firing a request that 404s.
+     *
+     * `fallbacks` is the order to offer when the current endpoint is unreachable:
+     * a provider covering the same area first.
+     *
+     * `dialect` picks the request/response vocabulary. Transitous is a MOTIS
+     * instance rather than a transport.rest one, so it is translated in
+     * js/motis.js; `geocoder: 'builtin'` says its own place index already
+     * covers addresses and points of interest, making the Photon fallback
+     * unnecessary while it is selected.
+     *
+     * `radarIntervalMs` stays per provider so one source can be treated more
+     * gently than the default without changing it for the rest. Transitous
+     * pins its own value rather than inheriting, because its usage policy is
+     * the reason for it — a later change to the default should not quietly
+     * speed it up.
+     */
     const PROVIDERS = {
-        'v6.bvg.transport.rest': 'BVG (Berlin)',
-        'v6.vbb.transport.rest': 'VBB (Berlin + Brandenburg)'
+        'v6.bvg.transport.rest': {
+            label: 'BVG (Berlin)',
+            area: 'Berlin',
+            dialect: 'hafas-rest',
+            radar: true,
+            lineSearch: true,
+            fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
+        },
+        'v6.vbb.transport.rest': {
+            label: 'VBB (Berlin + Brandenburg)',
+            area: 'Berlin und Brandenburg',
+            dialect: 'hafas-rest',
+            radar: true,
+            lineSearch: true,
+            fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
+        },
+        'v6.db.transport.rest': {
+            label: 'DB (deutschlandweit)',
+            area: 'Deutschland',
+            dialect: 'hafas-rest',
+            radar: false,
+            lineSearch: false,
+            fallbacks: ['api.transitous.org', 'v6.vbb.transport.rest']
+        },
+        'api.transitous.org': {
+            label: 'Transitous (deutschlandweit)',
+            area: 'Deutschland und Nachbarl\u00e4nder',
+            dialect: 'motis',
+            radar: true,
+            lineSearch: false,
+            geocoder: 'builtin',
+            radarIntervalMs: 30000,
+            attribution: {
+                text: 'Daten: Transitous / OpenStreetMap',
+                url: 'https://transitous.org/sources/'
+            },
+            fallbacks: ['v6.db.transport.rest', 'v6.vbb.transport.rest']
+        }
     };
 
     // Transport product keys understood by the transport.rest API.
     // Shared with the UI so filters, badges and query params can't drift apart.
     const PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
 
-    const DEFAULT_PROVIDER = 'v6.bvg.transport.rest';
+    // Nationwide by default: a fresh client has no way to say where it is, and
+     // a Berlin-only source is wrong everywhere else. A browser that has already
+     // chosen keeps its choice — loadState() restores it over this.
+     const DEFAULT_PROVIDER = 'api.transitous.org';
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
     const SERVER_ERROR_RETRIES = 1;
+    const DEFAULT_RADAR_INTERVAL_MS = 30000;
     const RETRY_DELAY_MS = 1500;
 
     let baseUrl = 'https://' + DEFAULT_PROVIDER;
@@ -34,8 +104,28 @@ const BvgApi = (() => {
     function setProvider(host) {
         if (PROVIDERS[host]) {
             baseUrl = 'https://' + host;
+            syncDialect();
         }
     }
+
+    /**
+     * Point the MOTIS adapter at the current host.
+     *
+     * Called on every provider change *and* once at load, because the default
+     * provider is applied by initialising `baseUrl` rather than by going
+     * through setProvider() — a client that never changes the setting would
+     * otherwise leave the adapter unconfigured.
+     *
+     * The adapter borrows this module's fetcher, so rate limiting, the 5xx
+     * retry and the outage diagnostics apply there too.
+     */
+    function syncDialect() {
+        if (!isMotis()) return;
+        MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
+    }
+
+    /** Is the selected endpoint a MOTIS instance rather than a transport.rest one? */
+    const isMotis = () => getCapabilities().dialect === 'motis';
 
     /**
      * Get the current provider host
@@ -47,21 +137,77 @@ const BvgApi = (() => {
 
     /**
      * Get available providers
-     * @returns {Object} host -> label mapping
+     * @returns {Object} host -> {label, area, radar, lineSearch, fallbacks}
      */
     function getProviders() {
         return { ...PROVIDERS };
     }
 
     /**
-     * The other endpoint. BVG and VBB are separate deployments that both cover
-     * Berlin, so when one is down the other usually is not.
+     * What the given provider (default: the current one) supports.
+     * Unknown hosts report no optional capabilities rather than throwing, so a
+     * stale saved setting degrades instead of breaking the page.
+     * @param {string} [host]
+     * @returns {{label: string, area: string, radar: boolean, lineSearch: boolean}}
+     */
+    function getCapabilities(host) {
+        const entry = PROVIDERS[host || getProvider()];
+        if (!entry) {
+            return {
+                label: '', area: '', dialect: 'hafas-rest', radar: false,
+                lineSearch: false, geocoder: 'external',
+                radarIntervalMs: DEFAULT_RADAR_INTERVAL_MS, attribution: null
+            };
+        }
+        return {
+            label: entry.label,
+            area: entry.area,
+            dialect: entry.dialect || 'hafas-rest',
+            radar: !!entry.radar,
+            lineSearch: !!entry.lineSearch,
+            geocoder: entry.geocoder || 'external',
+            radarIntervalMs: entry.radarIntervalMs || DEFAULT_RADAR_INTERVAL_MS,
+            attribution: entry.attribution || null
+        };
+    }
+
+    /**
+     * Where to send someone when the current endpoint is unreachable. These are
+     * separate deployments, so one being down rarely means the next one is.
      * @returns {{host: string, label: string}|null}
      */
     function getAlternateProvider() {
-        const current = getProvider();
-        const other = Object.keys(PROVIDERS).find(host => host !== current);
-        return other ? { host: other, label: PROVIDERS[other] } : null;
+        const current = PROVIDERS[getProvider()];
+        const host = (current && current.fallbacks || []).find(h => PROVIDERS[h]);
+        return host ? { host, label: PROVIDERS[host].label } : null;
+    }
+
+    /**
+     * Does this station ID belong to the selected backend?
+     *
+     * transport.rest speaks bare numeric HAFAS IDs; MOTIS speaks the source
+     * dataset's ID with a feed tag in front. A board saved against one shows
+     * nothing at all against the other, so the app re-resolves by name instead
+     * of failing silently.
+     * @param {string} id
+     * @returns {boolean}
+     */
+    function isNativeStationId(id) {
+        const value = String(id || '');
+        if (!value) return false;
+        return isMotis() ? MotisApi.isMotisId(value) : !MotisApi.isMotisId(value);
+    }
+
+    /**
+     * Refuse a call the current backend has no endpoint for, with an error the
+     * UI can tell apart from a network failure.
+     * @param {'radar'|'lineSearch'} capability
+     */
+    function assertSupported(capability) {
+        if (getCapabilities()[capability]) return;
+        const error = new Error(`${getCapabilities().label} liefert diese Daten nicht.`);
+        error.unsupported = capability;
+        throw error;
     }
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -180,6 +326,7 @@ const BvgApi = (() => {
     async function searchPlaces(query, opt = {}) {
         const text = (query || '').trim();
         if (text.length < 2) return [];
+        if (isMotis()) return MotisApi.searchPlaces(text, opt);
 
         const params = new URLSearchParams({
             query: text,
@@ -263,6 +410,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} Departures data
      */
     async function getDepartures(stationId, filters = {}, duration = 30, results = null) {
+        if (isMotis()) return MotisApi.getDepartures(stationId, filters, duration, results, PRODUCTS);
+
         const params = new URLSearchParams({
             duration: String(duration),
             remarks: 'true',
@@ -288,6 +437,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} Station data
      */
     async function getStation(stationId) {
+        if (isMotis()) return MotisApi.getStation(stationId);
+
         const params = new URLSearchParams({
             linesOfStops: 'true',
             pretty: 'false'
@@ -324,6 +475,8 @@ const BvgApi = (() => {
     }
 
     async function getJourneys(from, to, filters = {}, opt = {}) {
+        if (isMotis()) return MotisApi.getJourneys(from, to, filters, opt, PRODUCTS);
+
         const params = new URLSearchParams({
             results: String(opt.results || 4),
             stopovers: 'false',
@@ -363,6 +516,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { trip: {...} }
      */
     async function getTrip(tripId, withPolyline = true) {
+        if (isMotis()) return MotisApi.getTrip(tripId);
+
         const params = new URLSearchParams({
             stopovers: 'true',
             remarks: 'false',
@@ -383,6 +538,7 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { trips: [...] }
      */
     async function searchTripsByLine(lineName, opt = {}) {
+        assertSupported('lineSearch');
         const params = new URLSearchParams({
             lineName: String(lineName).trim(),
             onlyCurrentlyRunning: 'true',
@@ -408,6 +564,8 @@ const BvgApi = (() => {
      * @returns {Promise<Object>} { movements: [...] }
      */
     async function getRadar(bbox, opt = {}) {
+        assertSupported('radar');
+        if (isMotis()) return MotisApi.getRadar(bbox, opt);
         const params = new URLSearchParams({
             north: String(bbox.north),
             west: String(bbox.west),
@@ -464,9 +622,13 @@ const BvgApi = (() => {
         return stations;
     }
 
+    syncDialect();
+
     return {
         PRODUCTS,
         DEFAULT_PROVIDER,
+        getCapabilities,
+        isNativeStationId,
         searchPlaces,
         searchStations,
         searchAddresses,

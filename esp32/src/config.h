@@ -25,7 +25,7 @@
 #define CLK_PIN 16
 
 // ===== WiFi Configuration =====
-#define AP_SSID "BVG-Display"
+#define AP_SSID "Abfahrtsmonitor"
 #define AP_PASSWORD ""  // Open AP for setup
 #define WIFI_CONNECT_TIMEOUT 15000  // ms
 
@@ -55,8 +55,8 @@
 #define FW_VERSION "1.0.0"  // Overridden by CI on tagged releases
 #endif
 #define GITHUB_OWNER "jako-dev"
-#define GITHUB_REPO "bvg-display"
+#define GITHUB_REPO "abfahrtsmonitor"
 // GitHub API endpoint for latest release
 #define GITHUB_RELEASE_URL "https://api.github.com/repos/" GITHUB_OWNER "/" GITHUB_REPO "/releases/latest"
 // Expected firmware asset filename in the release
-#define FW_ASSET_NAME "bvg-display.bin"
+#define FW_ASSET_NAME "abfahrtsmonitor.bin"
