@@ -2418,38 +2418,63 @@
             // One entry per direction, not per running vehicle: the point is
             // the line's route, and every run of a direction draws the same one.
             const seen = new Set();
-            const directions = [];
+            const entries = [];
             for (const trip of trips) {
                 const line = trip.line || {};
                 const direction = trip.direction || (trip.destination && trip.destination.name) || '';
                 const key = `${line.name}|${direction}`;
                 if (!line.name || seen.has(key)) continue;
                 seen.add(key);
-                directions.push({
+                entries.push({
                     id: trip.id,
                     name: line.name,
                     product: line.product || '',
-                    direction
+                    direction,
+                    // Backends that only know about single runs return no kind;
+                    // each of their results is one direction of one line.
+                    kind: trip.kind || 'variant'
                 });
             }
 
-            if (directions.length === 0) {
+            if (entries.length === 0) {
                 dom.mapLineResults.innerHTML =
                     `<div class="search-result-item">${lineMissHtml(query)}</div>`;
                 return;
             }
 
-            dom.mapLineResults.innerHTML = directions.map(entry => `
-                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
-                     data-label="${escapeHtml(`${entry.name} → ${entry.direction}`)}">
-                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
-                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
-                </div>
-            `).join('');
+            // The line end to end is what someone typing "M10" is usually
+            // after; its individual routes — a short working, a branch — are
+            // worth having, but below and clearly separated.
+            const whole = entries.filter(e => e.kind === 'line');
+            const variants = entries.filter(e => e.kind !== 'line');
+
+            dom.mapLineResults.innerHTML = [
+                ...whole.map(e => lineResultHtml(e, true)),
+                whole.length && variants.length
+                    ? '<div class="search-result-divider">Einzelne Routen</div>' : '',
+                ...variants.map(e => lineResultHtml(e, false))
+            ].filter(Boolean).join('');
         } catch (e) {
             console.error('Line search failed:', e);
             dom.mapLineResults.innerHTML = `<div class="search-result-item">Fehler: ${escapeHtml(e.message)}</div>`;
         }
+    }
+
+    /**
+     * One row of the line dropdown. The whole-line row is marked so it reads as
+     * the headline answer rather than as the first of a list of near-identical
+     * entries.
+     */
+    function lineResultHtml(entry, isWholeLine) {
+        const label = `${entry.name} ${isWholeLine ? '·' : '→'} ${entry.direction}`.trim();
+        return `
+                <div class="search-result-item${isWholeLine ? ' is-whole-line' : ''}"
+                     data-trip-id="${escapeHtml(entry.id)}" data-label="${escapeHtml(label)}">
+                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
+                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
+                    ${isWholeLine ? '<span class="line-result-tag">ganze Linie</span>' : ''}
+                </div>
+            `;
     }
 
     /** Shared with the board badges so a line keeps its colour everywhere. */

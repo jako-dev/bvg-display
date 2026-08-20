@@ -471,6 +471,15 @@ app renders. Two things there are worth knowing:
   `getCapabilities().lineSearchScope` is `'map'` there and `'network'` on the
   transport.rest endpoints; the field's placeholder and its empty state say
   which is in force.
+- MOTIS holds one line as **several routes** — one per distinct stop sequence,
+  so each direction and every short working is its own entry. Drawing any one
+  of them draws part of the line. The search pools their segments, deduplicates
+  the shared hops, and walks the result end to end, so the first hit for "M10"
+  is the line from terminus to terminus; the individual routes follow under a
+  divider, since a branch or a short working is a real thing to want to see.
+  The searched box has a floor of roughly 13 × 13 km for the same reason —
+  sized to a line rather than to the viewport, so searching from a zoomed-in
+  street view does not return a stub.
 
 Rather than let unsupported calls fail, each provider declares what it supports
 in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
