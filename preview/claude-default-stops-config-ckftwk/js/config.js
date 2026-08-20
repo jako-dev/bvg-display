@@ -115,7 +115,7 @@ const AppConfig = (() => {
     function parseFilters(raw) {
         if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
             const filters = {};
-            for (const key of BvgApi.PRODUCTS) {
+            for (const key of TransitApi.PRODUCTS) {
                 const value = toBool(raw[key]);
                 if (value !== undefined) filters[key] = value;
             }
@@ -128,7 +128,7 @@ const AppConfig = (() => {
         if (wanted.size === 0) return undefined;
 
         const filters = {};
-        for (const key of BvgApi.PRODUCTS) filters[key] = wanted.has(key);
+        for (const key of TransitApi.PRODUCTS) filters[key] = wanted.has(key);
         return filters;
     }
 
@@ -144,7 +144,7 @@ const AppConfig = (() => {
         const stations = parseStations(raw.stations);
         if (stations) settings.stations = stations;
 
-        if (typeof raw.apiProvider === 'string' && BvgApi.getProviders()[raw.apiProvider]) {
+        if (typeof raw.apiProvider === 'string' && TransitApi.getProviders()[raw.apiProvider]) {
             settings.apiProvider = raw.apiProvider;
         }
 

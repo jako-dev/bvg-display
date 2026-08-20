@@ -5,7 +5,12 @@
     'use strict';
 
     // ===== Constants =====
-    const STORAGE_KEY = 'bvg-display-state';
+    const APP_NAME = 'Abfahrtsmonitor';
+    const STORAGE_KEY = 'abfahrtsmonitor-state';
+    // The key this app saved under before it was renamed. Read once, so an
+    // existing browser keeps its stations, walking times and favourites
+    // instead of coming back as a blank install.
+    const LEGACY_STORAGE_KEY = 'bvg-display-state';
     const LOOKAHEAD_MINUTES = 30;   // How far ahead to ask the API for departures
     const MAX_API_RESULTS = 40;     // Upper bound when over-fetching for walk time
     const LED_MAX_MERGED = 30;      // Cap on merged departures in LED view
@@ -13,12 +18,14 @@
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
-    const RADAR_INTERVAL_MS = 10000; // Live vehicle poll — one request per tick
+    const RADAR_INTERVAL_MS = 30000; // Live vehicle poll — one request per tick
     // The API's own maximum. Anything lower and a busy viewport comes back as
     // an arbitrary subset that differs on every poll — which looked like
     // vehicles randomly appearing and vanishing, and like a journey's later
     // legs having no vehicles at all.
     const RADAR_MAX_VEHICLES = 256;
+    // Fraction of the viewport's own span added on each side of a radar query.
+    const RADAR_BOUNDS_MARGIN = 0.25;
     const MAX_FAVOURITES = 8;
 
     // ===== State =====
@@ -47,7 +54,7 @@
         },
         mapTileUrl: null,       // Override the tile server (config.json only)
         mapAttribution: null,   // Attribution shown for that tile server
-        apiProvider: BvgApi.DEFAULT_PROVIDER,
+        apiProvider: TransitApi.DEFAULT_PROVIDER,
         filters: {
             suburban: true,
             subway: true,
@@ -75,6 +82,9 @@
     let selectedJourney = -1;
     let radarTimer = null;
     let mapHasRoutes = false;
+    // The box the vehicles on screen were actually fetched for. Panning away
+    // from it is what makes the reload offer meaningful.
+    let radarFetchedBounds = null;
     let mapReady = false;
     let mapInitPromise = null;
     let shownRoute = null;   // { tripId, label } of the trip route on the map
@@ -166,6 +176,7 @@
         mapLineResults: document.getElementById('map-line-results'),
         mapFilters: document.getElementById('map-filters'),
         mapFit: document.getElementById('map-fit'),
+        mapReloadArea: document.getElementById('map-reload-area'),
         mapClear: document.getElementById('map-clear'),
         mapStatus: document.getElementById('map-status'),
         viewSwitch: document.getElementById('view-switch'),
@@ -217,7 +228,7 @@
         // pointed at a source that has never heard of those IDs. Re-point them
         // before the first fetch rather than after it, so the board's first
         // paint is departures and not an error that fixes itself a second later.
-        if (state.stations.some(station => station.id && !BvgApi.isNativeStationId(station.id))) {
+        if (state.stations.some(station => station.id && !TransitApi.isNativeStationId(station.id))) {
             await remapStationsForProvider();
         }
 
@@ -268,8 +279,8 @@
         }
 
         if (settings.apiProvider) {
-            BvgApi.setProvider(settings.apiProvider);
-            state.apiProvider = BvgApi.getProvider();
+            TransitApi.setProvider(settings.apiProvider);
+            state.apiProvider = TransitApi.getProvider();
         }
     }
 
@@ -299,9 +310,26 @@
         }
     }
 
+    /**
+     * The saved settings, from the current key or — for a browser that last
+     * used this app under its old name — the one it used to write.
+     *
+     * The old entry is left in place rather than deleted: nothing else reads
+     * it, and removing it would make a downgrade lose everything. saveState()
+     * writes the new key, so the migration happens once and then stops
+     * mattering.
+     */
+    function readSavedState() {
+        const current = localStorage.getItem(STORAGE_KEY);
+        if (current) return current;
+        const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+        if (legacy) console.info('Migrating saved settings from the previous app name.');
+        return legacy;
+    }
+
     function loadState() {
         try {
-            const saved = localStorage.getItem(STORAGE_KEY);
+            const saved = readSavedState();
             if (!saved) return;
             const parsed = JSON.parse(saved);
             // Fall back to the current values rather than hard-coded ones:
@@ -334,9 +362,9 @@
                 state.homeAddress = parsed.homeAddress;
             }
             state.filters = { ...state.filters, ...parsed.filters };
-            BvgApi.setProvider(state.apiProvider);
+            TransitApi.setProvider(state.apiProvider);
             // setProvider ignores unknown hosts — mirror back what it accepted.
-            state.apiProvider = BvgApi.getProvider();
+            state.apiProvider = TransitApi.getProvider();
         } catch (e) {
             console.warn('Failed to load saved state:', e);
         }
@@ -455,7 +483,7 @@
         });
 
         // Filters
-        BvgApi.PRODUCTS.forEach(key => {
+        TransitApi.PRODUCTS.forEach(key => {
             const checkbox = document.getElementById(`filter-${key}`);
             if (!checkbox) return;
             checkbox.addEventListener('change', (e) => {
@@ -472,8 +500,8 @@
         // API provider
         dom.apiProviderSelect.addEventListener('change', (e) => {
             state.apiProvider = e.target.value;
-            BvgApi.setProvider(state.apiProvider);
-            state.apiProvider = BvgApi.getProvider();
+            TransitApi.setProvider(state.apiProvider);
+            state.apiProvider = TransitApi.getProvider();
             saveState();
             updateDataSourceLabel();
             applyProviderCapabilities();
@@ -650,8 +678,10 @@
             } else {
                 stopRadarTimer();
                 liveVehicles = [];
+                radarFetchedBounds = null;
                 TransitMap.setVehicles([]);
             }
+            updateReloadAreaOffer();
         });
         // Show any line's route by name — independent of the saved stations and
         // of what happens to be on screen.
@@ -693,6 +723,11 @@
         });
 
         dom.mapFit.addEventListener('click', () => TransitMap.fit());
+        dom.mapReloadArea.addEventListener('click', reloadRadarForView);
+
+        // Any settled move can make the offer relevant — a drag, a zoom, or
+        // flying to a route the user just picked.
+        TransitMap.onMoveEnd(() => updateReloadAreaOffer());
         dom.mapClear.addEventListener('click', () => {
             shownRoute = null;
             selectedJourney = -1;
@@ -755,8 +790,8 @@
             const btn = e.target.closest('#switch-provider[data-host]');
             if (!btn) return;
             state.apiProvider = btn.dataset.host;
-            BvgApi.setProvider(state.apiProvider);
-            state.apiProvider = BvgApi.getProvider();
+            TransitApi.setProvider(state.apiProvider);
+            state.apiProvider = TransitApi.getProvider();
             dom.apiProviderSelect.value = state.apiProvider;
             saveState();
             updateDataSourceLabel();
@@ -811,7 +846,7 @@
     // ===== Station Search =====
     async function searchStations(query) {
         try {
-            renderSearchResults(await BvgApi.searchStations(query));
+            renderSearchResults(await TransitApi.searchStations(query));
         } catch (e) {
             console.error('Search failed:', e);
             dom.searchResults.innerHTML = '<div class="search-result-item">Fehler bei der Suche</div>';
@@ -851,7 +886,7 @@
 
     function getProductBadges(products) {
         if (!products) return '';
-        return BvgApi.PRODUCTS
+        return TransitApi.PRODUCTS
             .filter(key => products[key])
             .map(key => {
                 const [cls, label] = PRODUCT_BADGES[key];
@@ -915,16 +950,16 @@
     async function remapStationsForProvider() {
         const stale = state.stations.filter(station =>
             station.id && station.name && station.name !== station.id
-            && !BvgApi.isNativeStationId(station.id));
+            && !TransitApi.isNativeStationId(station.id));
         if (stale.length === 0) return false;
 
-        const label = BvgApi.getCapabilities().label;
+        const label = TransitApi.getCapabilities().label;
         showBoardMessage(`Stationen werden auf ${escapeHtml(label)} übertragen…`);
 
         const remap = new Map();
         for (const station of stale) {
             try {
-                const hits = await BvgApi.searchStations(station.name);
+                const hits = await TransitApi.searchStations(station.name);
                 const hit = hits.find(h => h && h.id);
                 if (!hit) continue;
                 remap.set(station.id, hit.id);
@@ -942,21 +977,21 @@
         // Anything that failed to find a counterpart would otherwise sit in the
         // list looking fine and loading nothing.
         const dropped = state.stations.filter(station =>
-            station.id && !BvgApi.isNativeStationId(station.id));
+            station.id && !TransitApi.isNativeStationId(station.id));
         state.stations = state.stations.filter(station => !dropped.includes(station));
 
         // Every other reference is by ID, so they all have to follow.
         for (const key of ['activeStationId', 'splitLeftId', 'splitRightId', 'homeStationId']) {
             if (remap.has(state[key])) state[key] = remap.get(state[key]);
-            else if (state[key] && !BvgApi.isNativeStationId(state[key])) state[key] = null;
+            else if (state[key] && !TransitApi.isNativeStationId(state[key])) state[key] = null;
         }
-        if (state.destination && state.destination.id && !BvgApi.isNativeStationId(state.destination.id)) {
+        if (state.destination && state.destination.id && !TransitApi.isNativeStationId(state.destination.id)) {
             state.destination = remap.has(state.destination.id)
                 ? { ...state.destination, id: remap.get(state.destination.id) }
                 : null;
         }
         state.favourites = state.favourites.filter(fav =>
-            !fav.id || BvgApi.isNativeStationId(fav.id) || remap.has(fav.id));
+            !fav.id || TransitApi.isNativeStationId(fav.id) || remap.has(fav.id));
         state.favourites = state.favourites.map(fav =>
             fav.id && remap.has(fav.id) ? { ...fav, id: remap.get(fav.id) } : fav);
 
@@ -987,7 +1022,7 @@
         let resolved = false;
         for (const station of pending) {
             try {
-                const data = await BvgApi.getStation(station.id);
+                const data = await TransitApi.getStation(station.id);
                 const stop = (data && data.stop) || data || {};
                 if (stop.name && (!station.name || station.name === station.id)) {
                     station.name = stop.name;
@@ -1114,7 +1149,7 @@
         dom.loadingIndicator.classList.add('hidden');
         clearBoardMessage();
         dom.noStationMsg.classList.remove('hidden');
-        dom.currentStationName.textContent = 'BVG Abfahrtsmonitor';
+        dom.currentStationName.textContent = APP_NAME;
         dom.alertsBanner.classList.add('hidden');
         dom.departuresList.innerHTML = '';
         stopRefreshTimer();
@@ -1170,7 +1205,7 @@
 
     async function loadStationDepartures(station) {
         const { duration, results } = fetchParamsFor(station);
-        const data = await BvgApi.getDepartures(station.id, state.filters, duration, results);
+        const data = await TransitApi.getDepartures(station.id, state.filters, duration, results);
         const departures = filterByWalkTime(data.departures || [], station.walkTime || 0);
         return { data, departures };
     }
@@ -1233,14 +1268,14 @@
     }
 
     /**
-     * When the endpoint itself is unreachable, offer the other one. BVG and VBB
-     * are separately hosted and both cover Berlin, so one being down rarely
-     * means both are. Offered rather than switched automatically — the data
-     * source is a visible setting and should not change behind your back.
+     * When the endpoint itself is unreachable, offer the next one. The four
+     * sources are separately hosted, so one being down rarely means the next
+     * one is. Offered rather than switched automatically — the data source is
+     * a visible setting and should not change behind your back.
      */
     function providerFallbackHtml(error) {
         if (!error || !error.unreachable) return '';
-        const alternate = BvgApi.getAlternateProvider();
+        const alternate = TransitApi.getAlternateProvider();
         if (!alternate) return '';
         return `<button class="btn-ghost" id="switch-provider" data-host="${escapeHtml(alternate.host)}">
                     Auf ${escapeHtml(alternate.label)} umschalten
@@ -1361,7 +1396,7 @@
     }
 
     function updateDataSourceLabel() {
-        dom.dataSource.textContent = `Daten: ${BvgApi.getCapabilities().label || 'BVG / VBB'}`;
+        dom.dataSource.textContent = `Daten: ${TransitApi.getCapabilities().label || 'unbekannte Quelle'}`;
     }
 
     /**
@@ -1375,7 +1410,7 @@
      * the truth. Everything else (boards, journeys, routes) is unaffected.
      */
     function applyProviderCapabilities() {
-        const caps = BvgApi.getCapabilities();
+        const caps = TransitApi.getCapabilities();
 
         document.body.dataset.radar = caps.radar ? 'yes' : 'no';
         document.body.dataset.lineSearch = caps.lineSearch ? 'yes' : 'no';
@@ -1384,12 +1419,18 @@
             stopRadarTimer();
             liveVehicles = [];
             radarTruncated = false;
+            radarFetchedBounds = null;
             TransitMap.setVehicles([]);
         }
+        updateReloadAreaOffer();
 
         if (!caps.lineSearch) {
             dom.mapLineInput.value = '';
             dom.mapLineResults.classList.add('hidden');
+        } else {
+            dom.mapLineInput.placeholder = caps.lineSearchScope === 'map'
+                ? 'Linie im Ausschnitt, z.B. M10'
+                : 'Linie anzeigen, z.B. M10';
         }
 
         // Some sources index addresses and points of interest themselves, so
@@ -1453,7 +1494,7 @@
 
     // ===== Filters =====
     function applyFiltersToUI() {
-        BvgApi.PRODUCTS.forEach(key => {
+        TransitApi.PRODUCTS.forEach(key => {
             const checkbox = document.getElementById(`filter-${key}`);
             if (checkbox) checkbox.checked = state.filters[key];
         });
@@ -1500,6 +1541,8 @@
     // ===== View Mode =====
     function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
+        // The offer belongs to the map; it must not survive leaving it.
+        if (mode !== 'map') dom.mapReloadArea.classList.add('hidden');
         // Exposed for CSS: some chrome is redundant in some views and only
         // worth hiding there (the app title means nothing in split view,
         // where each pane is already labelled with its station).
@@ -1562,7 +1605,7 @@
             stopRefreshTimer();
         } else if (mode === 'split') {
             dom.splitView.classList.remove('hidden');
-            dom.currentStationName.textContent = 'BVG Abfahrtsmonitor';
+            dom.currentStationName.textContent = APP_NAME;
             fetchSplitDepartures();
             startRefreshTimer();
         } else if (mode === 'led') {
@@ -1802,7 +1845,7 @@
 
     async function searchHomeAddress(query) {
         try {
-            const results = await BvgApi.searchAddresses(query);
+            const results = await TransitApi.searchAddresses(query);
             if (results.length === 0) {
                 dom.homeAddressResults.innerHTML = '<div class="search-result-item">Keine Adresse gefunden</div>';
             } else {
@@ -1842,7 +1885,7 @@
      */
     async function searchDestination(query) {
         try {
-            let results = await BvgApi.searchPlaces(query, {
+            let results = await TransitApi.searchPlaces(query, {
                 stops: true, addresses: true, poi: true, results: 15
             });
 
@@ -1935,7 +1978,7 @@
                 ? new Date(Date.now() + origin.walkTime * 60000)
                 : null;
 
-            const data = await BvgApi.getJourneys(origin.place, destination, state.filters, {
+            const data = await TransitApi.getJourneys(origin.place, destination, state.filters, {
                 results: 5,
                 polylines: true,
                 departure
@@ -2068,17 +2111,17 @@
         try {
             // The map has to exist before anything can be drawn on it, and the
             // trip fetch is independent of it — so wait on both, not in series.
-            const [data] = await Promise.all([BvgApi.getTrip(tripId, true), initMapView()]);
+            const [data] = await Promise.all([TransitApi.getTrip(tripId, true), initMapView()]);
             if (token !== requestToken || !shownRoute || shownRoute.tripId !== tripId) return;
 
             const trip = data.trip || {};
-            const points = BvgApi.polylineToLatLngs(trip.polyline);
+            const points = TransitApi.polylineToLatLngs(trip.polyline);
             if (points.length < 2) {
                 setMapStatus('Für diese Fahrt liegt keine Route vor.', true);
                 return;
             }
 
-            const stations = BvgApi.polylineStations(trip.polyline);
+            const stations = TransitApi.polylineStations(trip.polyline);
             setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
             setMapFocus([(trip.line && trip.line.name) || '']);
@@ -2102,6 +2145,12 @@
     /**
      * Bounding box for the radar query. Prefers what the map is showing;
      * falls back to a box around the saved stations before the map has a size.
+     *
+     * The map's own box is widened by a margin rather than used as-is. That
+     * buys two things: vehicles just off the edge are already loaded, so a
+     * small pan does not blank them in, and the "these vehicles are from
+     * somewhere else" offer only appears once the view has genuinely left the
+     * area — with an exact box, nudging the map by a few pixels would trip it.
      */
     function radarBounds() {
         const points = [];
@@ -2110,7 +2159,7 @@
         }
 
         const mapBounds = TransitMap.getBounds && TransitMap.getBounds();
-        if (mapBounds) return mapBounds;
+        if (mapBounds) return padBounds(mapBounds, RADAR_BOUNDS_MARGIN);
         if (points.length === 0) return null;
 
         const lats = points.map(p => p[0]);
@@ -2127,13 +2176,13 @@
 
     async function fetchRadar() {
         if (!state.mapLive || state.viewMode !== 'map') return;
-        if (!BvgApi.getCapabilities().radar) return;
+        if (!TransitApi.getCapabilities().radar) return;
 
         const bounds = radarBounds();
         if (!bounds) return;
 
         try {
-            const data = await BvgApi.getRadar(bounds, {
+            const data = await TransitApi.getRadar(bounds, {
                 results: RADAR_MAX_VEHICLES,
                 // MOTIS filters by zoom (long distance only when far out); the
                 // transport.rest endpoints ignore it.
@@ -2151,13 +2200,65 @@
             // of it — worth saying, because the missing vehicles are otherwise
             // indistinguishable from ones that aren't running.
             radarTruncated = movements.length >= RADAR_MAX_VEHICLES;
+            radarFetchedBounds = bounds;
             liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
             applyMapFilters();
+            updateReloadAreaOffer();
             updateLastRefreshTime();
         } catch (e) {
             console.warn('Radar poll failed:', e.message);
             setMapStatus(`Live-Fahrzeuge nicht verfügbar: ${e.message}`, true);
         }
+    }
+
+    /**
+     * Offer to re-fetch when the map has been panned off the area the vehicles
+     * came from.
+     *
+     * The poll asks for one bounding box, so vehicles outside it were never in
+     * the answer — scrolling to a new part of the city shows an empty map that
+     * looks like a bug rather than a boundary. Rather than re-polling on every
+     * pan, which is what made a single click fire several requests the last
+     * time the map drove its own fetching, the user is offered the reload and
+     * decides.
+     *
+     * Shown only once the view has actually left the fetched box: a small
+     * nudge inside it changes nothing about what is on screen.
+     */
+    function updateReloadAreaOffer() {
+        const caps = TransitApi.getCapabilities();
+        const relevant = state.viewMode === 'map' && state.mapLive && caps.radar;
+        const view = relevant ? TransitMap.getBounds() : null;
+
+        const stale = !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
+        dom.mapReloadArea.classList.toggle('hidden', !stale);
+    }
+
+    /** Grow a box by a fraction of its own span on every side. */
+    function padBounds(bounds, fraction) {
+        const padLat = Math.abs(bounds.north - bounds.south) * fraction;
+        const padLon = Math.abs(bounds.east - bounds.west) * fraction;
+        return {
+            north: bounds.north + padLat, south: bounds.south - padLat,
+            east: bounds.east + padLon, west: bounds.west - padLon
+        };
+    }
+
+    /** Is `inner` entirely within `outer`? A hair of tolerance for rounding. */
+    function containsBounds(outer, inner) {
+        const e = 1e-6;
+        return inner.north <= outer.north + e && inner.south >= outer.south - e
+            && inner.east <= outer.east + e && inner.west >= outer.west - e;
+    }
+
+    async function reloadRadarForView() {
+        dom.mapReloadArea.disabled = true;
+        try {
+            await fetchRadar();
+        } finally {
+            dom.mapReloadArea.disabled = false;
+        }
+        updateReloadAreaOffer();
     }
 
     /**
@@ -2220,11 +2321,11 @@
      */
     function updateLiveNote(focused, count) {
         let live = '';
-        if (state.mapLive && BvgApi.getCapabilities().radar) {
+        if (state.mapLive && TransitApi.getCapabilities().radar) {
             if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
             else if (count > 0) live = `Live: ${count} Fahrzeuge`;
             if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
-        } else if (!BvgApi.getCapabilities().radar && !mapHasRoutes) {
+        } else if (!TransitApi.getCapabilities().radar && !mapHasRoutes) {
             // No live feed on this source, so an empty map is the normal state
             // rather than a failure — point at what does put something on it.
             live = 'Route über eine Abfahrt oder eine Verbindung öffnen';
@@ -2248,13 +2349,32 @@
      * is why a line that happens not to be running past you was missing from
      * the old picker. /trips searches by line name across the whole network.
      */
+    /**
+     * Why a line was not found, which depends on how the backend looks.
+     * A network-wide search misses a line that is not running; a map-scoped one
+     * misses a line that is not near what you are looking at, and panning or
+     * zooming out fixes that.
+     */
+    function lineMissHtml(query) {
+        const scoped = TransitApi.getCapabilities().lineSearchScope === 'map';
+        return `Keine Linie „${escapeHtml(query)}" ${scoped
+            ? 'in diesem Kartenausschnitt. Karte verschieben oder herauszoomen.'
+            : 'gefunden (fährt sie gerade?)'}`;
+    }
+
     async function searchMapLine(query) {
-        if (!BvgApi.getCapabilities().lineSearch) return;
+        if (!TransitApi.getCapabilities().lineSearch) return;
         dom.mapLineResults.innerHTML = '<div class="search-result-item">Suche&hellip;</div>';
         dom.mapLineResults.classList.remove('hidden');
 
         try {
-            const data = await BvgApi.searchTripsByLine(query, { results: 30 });
+            const data = await TransitApi.searchTripsByLine(query, {
+                results: 30,
+                // A map-scoped backend needs to know what is on screen; a
+                // network-wide one ignores both and searches everything.
+                bounds: TransitMap.getBounds(),
+                zoom: TransitMap.getZoom()
+            });
             const trips = Array.isArray(data.trips) ? data.trips : [];
 
             // One entry per direction, not per running vehicle: the point is
@@ -2276,7 +2396,8 @@
             }
 
             if (directions.length === 0) {
-                dom.mapLineResults.innerHTML = `<div class="search-result-item">Keine Linie „${escapeHtml(query)}" gefunden (fährt sie gerade?)</div>`;
+                dom.mapLineResults.innerHTML =
+                    `<div class="search-result-item">${lineMissHtml(query)}</div>`;
                 return;
             }
 
@@ -2301,14 +2422,15 @@
     }
 
     /**
-     * The poll rate belongs to the provider, not to the app: 10s against a
-     * transport.rest endpoint is ordinary, while Transitous is donated
-     * infrastructure that asks to be treated gently, so it polls at 30s.
+     * Live vehicles poll every 30s on every source. The rate is still read from
+     * the provider so one can be slowed further than the default, but nothing
+     * is polled faster than this — a wall display left running all day is a lot
+     * of requests against endpoints that are free to use.
      */
     function startRadarTimer() {
         stopRadarTimer();
         if (!state.mapLive) return;
-        const caps = BvgApi.getCapabilities();
+        const caps = TransitApi.getCapabilities();
         if (!caps.radar) return;
         radarTimer = setInterval(fetchRadar, caps.radarIntervalMs || RADAR_INTERVAL_MS);
     }

@@ -6,7 +6,7 @@
     <meta name="description" content="Echtzeit-Abfahrtsmonitor für Berliner Nahverkehr (BVG/VBB) — mehrere Stationen, Fußweg-Filter, Kiosk- und LED-Panel-Ansicht.">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#1a1a1a">
-    <title>BVG Abfahrtsmonitor</title>
+    <title>Abfahrtsmonitor</title>
     <link rel="icon" href="icons/icon-192.png" type="image/png">
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="manifest" href="manifest.json">
@@ -156,10 +156,10 @@
                 <div class="setting-group">
                     <label for="api-provider">Datenquelle</label>
                     <select id="api-provider">
+                        <option value="api.transitous.org">Transitous (deutschlandweit)</option>
+                        <option value="v6.db.transport.rest">DB (deutschlandweit)</option>
                         <option value="v6.bvg.transport.rest">BVG (Berlin)</option>
                         <option value="v6.vbb.transport.rest">VBB (Berlin + Brandenburg)</option>
-                        <option value="v6.db.transport.rest">DB (deutschlandweit)</option>
-                        <option value="api.transitous.org">Transitous (deutschlandweit)</option>
                     </select>
                     <p class="setting-hint" id="provider-hint"></p>
                 </div>
@@ -189,7 +189,7 @@
             <!-- Header -->
             <div class="display-header" id="display-header">
                 <div class="header-left">
-                    <h1 class="station-name" id="current-station-name">BVG Abfahrtsmonitor</h1>
+                    <h1 class="station-name" id="current-station-name">Abfahrtsmonitor</h1>
                     <span class="realtime-indicator" id="realtime-indicator" title="Echtzeitdaten">&#9679;</span>
                 </div>
                 <!-- Ansicht: the same modes as the settings panel, one click away.
@@ -333,6 +333,9 @@
                     <span class="map-status" id="map-status"></span>
                 </div>
                 <div id="map-container" class="map-container"></div>
+                <button id="map-reload-area" class="map-reload-area hidden" type="button">
+                    <span aria-hidden="true">&#8635;</span> Fahrzeuge hier laden
+                </button>
             </div>
 
             <!-- LED Panel Emulation View -->
@@ -345,7 +348,7 @@
             <!-- Footer -->
             <div class="display-footer" id="display-footer">
                 <span id="last-update">Letzte Aktualisierung: --:--</span>
-                <span class="data-source" id="data-source">Daten: BVG / VBB</span>
+                <span class="data-source" id="data-source">Daten werden geladen&hellip;</span>
                 <a class="data-attribution hidden" id="data-attribution" target="_blank" rel="noopener"></a>
             </div>
         </div>

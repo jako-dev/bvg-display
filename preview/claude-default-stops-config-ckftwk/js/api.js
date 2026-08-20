@@ -1,9 +1,9 @@
 /**
  * Transport API Module
  * Handles all communication with the transport.rest API
- * Supports BVG (Berlin) and VBB (Berlin + Brandenburg)
+ * Supports Transitous (MOTIS) and the transport.rest endpoints for DB, BVG and VBB.
  */
-const BvgApi = (() => {
+const TransitApi = (() => {
     'use strict';
 
     /**
@@ -30,9 +30,11 @@ const BvgApi = (() => {
      * covers addresses and points of interest, making the Photon fallback
      * unnecessary while it is selected.
      *
-     * `radarIntervalMs` is per provider because the polling that is fine
-     * against a commercial-scale endpoint is not fine against donated
-     * infrastructure — Transitous asks to be contacted before heavy use.
+     * `radarIntervalMs` stays per provider so one source can be treated more
+     * gently than the default without changing it for the rest. Transitous
+     * pins its own value rather than inheriting, because its usage policy is
+     * the reason for it — a later change to the default should not quietly
+     * speed it up.
      */
     const PROVIDERS = {
         'v6.bvg.transport.rest': {
@@ -41,7 +43,6 @@ const BvgApi = (() => {
             dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            radarIntervalMs: 10000,
             fallbacks: ['v6.vbb.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.vbb.transport.rest': {
@@ -50,7 +51,6 @@ const BvgApi = (() => {
             dialect: 'hafas-rest',
             radar: true,
             lineSearch: true,
-            radarIntervalMs: 10000,
             fallbacks: ['v6.bvg.transport.rest', 'v6.db.transport.rest', 'api.transitous.org']
         },
         'v6.db.transport.rest': {
@@ -66,7 +66,10 @@ const BvgApi = (() => {
             area: 'Deutschland und Nachbarl\u00e4nder',
             dialect: 'motis',
             radar: true,
-            lineSearch: false,
+            lineSearch: true,
+            // MOTIS has no search-by-name endpoint; the line lookup reads the
+            // routes around what is on screen instead of the whole network.
+            lineSearchScope: 'map',
             geocoder: 'builtin',
             radarIntervalMs: 30000,
             attribution: {
@@ -81,11 +84,14 @@ const BvgApi = (() => {
     // Shared with the UI so filters, badges and query params can't drift apart.
     const PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
 
-    const DEFAULT_PROVIDER = 'v6.bvg.transport.rest';
+    // Nationwide by default: a fresh client has no way to say where it is, and
+     // a Berlin-only source is wrong everywhere else. A browser that has already
+     // chosen keeps its choice — loadState() restores it over this.
+     const DEFAULT_PROVIDER = 'api.transitous.org';
     const RATE_LIMIT_DELAY = 650;  // ms between requests to stay under 100/min
     const REQUEST_TIMEOUT = 12000; // ms
     const SERVER_ERROR_RETRIES = 1;
-    const DEFAULT_RADAR_INTERVAL_MS = 10000;
+    const DEFAULT_RADAR_INTERVAL_MS = 30000;
     const RETRY_DELAY_MS = 1500;
 
     let baseUrl = 'https://' + DEFAULT_PROVIDER;
@@ -101,12 +107,24 @@ const BvgApi = (() => {
     function setProvider(host) {
         if (PROVIDERS[host]) {
             baseUrl = 'https://' + host;
-            if (isMotis()) {
-                // The adapter borrows this module's fetcher so rate limiting,
-                // the 5xx retry and the outage diagnostics apply there too.
-                MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
-            }
+            syncDialect();
         }
+    }
+
+    /**
+     * Point the MOTIS adapter at the current host.
+     *
+     * Called on every provider change *and* once at load, because the default
+     * provider is applied by initialising `baseUrl` rather than by going
+     * through setProvider() — a client that never changes the setting would
+     * otherwise leave the adapter unconfigured.
+     *
+     * The adapter borrows this module's fetcher, so rate limiting, the 5xx
+     * retry and the outage diagnostics apply there too.
+     */
+    function syncDialect() {
+        if (!isMotis()) return;
+        MotisApi.configure({ baseUrl, fetchJson: (url) => rateLimitedFetch(url) });
     }
 
     /** Is the selected endpoint a MOTIS instance rather than a transport.rest one? */
@@ -140,7 +158,7 @@ const BvgApi = (() => {
         if (!entry) {
             return {
                 label: '', area: '', dialect: 'hafas-rest', radar: false,
-                lineSearch: false, geocoder: 'external',
+                lineSearch: false, lineSearchScope: 'network', geocoder: 'external',
                 radarIntervalMs: DEFAULT_RADAR_INTERVAL_MS, attribution: null
             };
         }
@@ -150,6 +168,7 @@ const BvgApi = (() => {
             dialect: entry.dialect || 'hafas-rest',
             radar: !!entry.radar,
             lineSearch: !!entry.lineSearch,
+            lineSearchScope: entry.lineSearchScope || 'network',
             geocoder: entry.geocoder || 'external',
             radarIntervalMs: entry.radarIntervalMs || DEFAULT_RADAR_INTERVAL_MS,
             attribution: entry.attribution || null
@@ -524,6 +543,8 @@ const BvgApi = (() => {
      */
     async function searchTripsByLine(lineName, opt = {}) {
         assertSupported('lineSearch');
+        if (isMotis()) return MotisApi.searchTripsByLine(lineName, opt);
+
         const params = new URLSearchParams({
             lineName: String(lineName).trim(),
             onlyCurrentlyRunning: 'true',
@@ -606,6 +627,8 @@ const BvgApi = (() => {
         }
         return stations;
     }
+
+    syncDialect();
 
     return {
         PRODUCTS,

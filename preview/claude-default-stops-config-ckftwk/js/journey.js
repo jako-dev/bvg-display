@@ -221,7 +221,7 @@ const JourneyView = (() => {
     function toRoutes(journey) {
         const routes = [];
         for (const leg of journey.legs || []) {
-            let points = BvgApi.polylineToLatLngs(leg.polyline);
+            let points = TransitApi.polylineToLatLngs(leg.polyline);
 
             // HAFAS often returns no shape for a walking leg. Drawing a
             // straight dashed hop between its endpoints is not the pavement

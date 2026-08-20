@@ -155,6 +155,7 @@ const TransitMap = (() => {
 
             staticLayer = L.layerGroup().addTo(map);
             vehicleLayer = L.layerGroup().addTo(map);
+            map.on('moveend', handleMoveEnd);
             mode = 'leaflet';
 
             // Leaflet measures the container on creation; in a view that was
@@ -553,6 +554,28 @@ const TransitMap = (() => {
     }
 
     /**
+     * Called after every settled pan or zoom, whoever caused it.
+     *
+     * Deliberately not filtered to user gestures: the caller uses this to
+     * decide whether an offer is still relevant, not to fetch anything, and a
+     * programmatic fit — flying to a route the user just picked — moves the
+     * view just as much as a drag does.
+     *
+     * @param {function({north,south,east,west}): void} callback
+     */
+    function onMoveEnd(callback) {
+        moveEndCallback = typeof callback === 'function' ? callback : null;
+    }
+
+    let moveEndCallback = null;
+
+    function handleMoveEnd() {
+        if (!moveEndCallback) return;
+        const bounds = getBounds();
+        if (bounds) moveEndCallback(bounds);
+    }
+
+    /**
      * Current zoom, for backends that use it to decide how much to send.
      * Null on the schematic fallback, where there is no tile pyramid.
      * @returns {number|null}
@@ -594,6 +617,7 @@ const TransitMap = (() => {
         init,
         getBounds,
         getZoom,
+        onMoveEnd,
         setRoutes,
         setStops,
         setPins,
