@@ -74,6 +74,7 @@
     let journeys = [];
     let selectedJourney = -1;
     let radarTimer = null;
+    let mapHasRoutes = false;
     let mapReady = false;
     let mapInitPromise = null;
     let shownRoute = null;   // { tripId, label } of the trip route on the map
@@ -120,6 +121,7 @@
         realtimeIndicator: document.getElementById('realtime-indicator'),
         alertsBanner: document.getElementById('alerts-banner'),
         apiProviderSelect: document.getElementById('api-provider'),
+        providerHint: document.getElementById('provider-hint'),
         departureCountSelect: document.getElementById('departure-count'),
         refreshIntervalInput: document.getElementById('refresh-interval'),
         themeDark: document.getElementById('theme-dark'),
@@ -203,6 +205,7 @@
         renderJourneyControls();
         renderMapFilters();
         updateDataSourceLabel();
+        applyProviderCapabilities();
 
         if (state.kioskMode) {
             enterKioskMode(false); // restore without hint
@@ -460,8 +463,10 @@
         dom.apiProviderSelect.addEventListener('change', (e) => {
             state.apiProvider = e.target.value;
             BvgApi.setProvider(state.apiProvider);
+            state.apiProvider = BvgApi.getProvider();
             saveState();
             updateDataSourceLabel();
+            applyProviderCapabilities();
             refreshCurrentView();
         });
 
@@ -683,7 +688,7 @@
             selectedJourney = -1;
             dom.mapLineInput.value = '';
             dom.mapLineResults.classList.add('hidden');
-            TransitMap.setRoutes([]);
+            drawRoutes([]);
             TransitMap.setStops([]);
             setMapTitle('');
             setMapFocus([]);
@@ -745,6 +750,7 @@
             dom.apiProviderSelect.value = state.apiProvider;
             saveState();
             updateDataSourceLabel();
+            applyProviderCapabilities();
             clearBoardMessage();
             refreshCurrentView();
         });
@@ -1256,8 +1262,49 @@
     }
 
     function updateDataSourceLabel() {
-        const providers = BvgApi.getProviders();
-        dom.dataSource.textContent = `Daten: ${providers[BvgApi.getProvider()] || 'BVG / VBB'}`;
+        dom.dataSource.textContent = `Daten: ${BvgApi.getCapabilities().label || 'BVG / VBB'}`;
+    }
+
+    /**
+     * Fit the UI to what the selected endpoint can actually answer.
+     *
+     * All providers speak the same shape, but they are not the same backend:
+     * the nationwide DB one has no live-vehicle feed and no search-by-line,
+     * because the HAFAS endpoint those came from was retired. Hiding the two
+     * controls is better than leaving them there to fail — a dead toggle reads
+     * as a bug, a missing one reads as "this source doesn't do that", which is
+     * the truth. Everything else (boards, journeys, routes) is unaffected.
+     */
+    function applyProviderCapabilities() {
+        const caps = BvgApi.getCapabilities();
+
+        document.body.dataset.radar = caps.radar ? 'yes' : 'no';
+        document.body.dataset.lineSearch = caps.lineSearch ? 'yes' : 'no';
+
+        if (!caps.radar) {
+            stopRadarTimer();
+            liveVehicles = [];
+            radarTruncated = false;
+            TransitMap.setVehicles([]);
+        }
+
+        if (!caps.lineSearch) {
+            dom.mapLineInput.value = '';
+            dom.mapLineResults.classList.add('hidden');
+        }
+
+        const missing = [
+            caps.radar ? '' : 'Live-Fahrzeuge',
+            caps.lineSearch ? '' : 'Liniensuche'
+        ].filter(Boolean);
+
+        dom.providerHint.textContent = missing.length
+            ? `Deckt ${caps.area} ab, liefert aber keine ${missing.join(' und keine ')}.`
+            : `Deckt ${caps.area} ab.`;
+
+        // The status line may still be showing a vehicle count from the
+        // provider we just left.
+        if (state.viewMode === 'map') applyMapFilters();
     }
 
     // ===== Alerts/Remarks =====
@@ -1879,7 +1926,7 @@
     function applyPendingMapScene() {
         if (!pendingMapScene) return;
         setMapTitle(pendingMapScene.title);
-        TransitMap.setRoutes(pendingMapScene.routes || []);
+        drawRoutes(pendingMapScene.routes || []);
         TransitMap.setStops(pendingMapScene.stops || []);
         TransitMap.fit();
         pendingMapScene = null;
@@ -1915,7 +1962,7 @@
             setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
             setMapFocus([(trip.line && trip.line.name) || '']);
-            TransitMap.setRoutes([{
+            drawRoutes([{
                 points,
                 product: (trip.line && trip.line.product) || '',
                 label: (trip.line && trip.line.name) || ''
@@ -1960,6 +2007,7 @@
 
     async function fetchRadar() {
         if (!state.mapLive || state.viewMode !== 'map') return;
+        if (!BvgApi.getCapabilities().radar) return;
 
         const bounds = radarBounds();
         if (!bounds) return;
@@ -2013,6 +2061,16 @@
      * connection on screen, or — when nothing is shown — everything that
      * passes the product filter.
      */
+    /**
+     * Every route change goes through here so `mapHasRoutes` cannot drift out of
+     * sync with what is actually drawn.
+     */
+    function drawRoutes(routes) {
+        const list = Array.isArray(routes) ? routes : [];
+        mapHasRoutes = list.length > 0;
+        TransitMap.setRoutes(list);
+    }
+
     function applyMapFilters() {
         const focused = mapFocus && mapFocus.lines && mapFocus.lines.size > 0;
         const vehicles = liveVehicles.filter(v => focused
@@ -2039,10 +2097,14 @@
      */
     function updateLiveNote(focused, count) {
         let live = '';
-        if (state.mapLive) {
+        if (state.mapLive && BvgApi.getCapabilities().radar) {
             if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
             else if (count > 0) live = `Live: ${count} Fahrzeuge`;
             if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+        } else if (!BvgApi.getCapabilities().radar && !mapHasRoutes) {
+            // No live feed on this source, so an empty map is the normal state
+            // rather than a failure — point at what does put something on it.
+            live = 'Route über eine Abfahrt oder eine Verbindung öffnen';
         }
         setMapStatus([mapFallbackNote, live].filter(Boolean).join(' · '));
     }
@@ -2064,6 +2126,7 @@
      * the old picker. /trips searches by line name across the whole network.
      */
     async function searchMapLine(query) {
+        if (!BvgApi.getCapabilities().lineSearch) return;
         dom.mapLineResults.innerHTML = '<div class="search-result-item">Suche&hellip;</div>';
         dom.mapLineResults.classList.remove('hidden');
 

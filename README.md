@@ -94,7 +94,7 @@ that has **not** configured its own stations starts with what is listed here:
 |-----|-------------|
 | `stations` | Default stations. `name` and `walkTime` are optional — a missing name is looked up from the API on first load |
 | `lock` | `true` makes this file win over the client's own saved settings — for dedicated wall displays that must always show the same stations |
-| `apiProvider` | `v6.bvg.transport.rest` or `v6.vbb.transport.rest` |
+| `apiProvider` | `v6.bvg.transport.rest`, `v6.vbb.transport.rest` or `v6.db.transport.rest` |
 | `departureCount` | 1–15 |
 | `refreshInterval` | 10–120 seconds |
 | `theme` | `dark` or `modern` |
@@ -134,7 +134,7 @@ https://jako-dev.github.io/bvg-display/?stop=900100003:4&stop=900120005&view=spl
 | `theme` | — | `theme=modern` |
 | `count` | `departures` | `count=9` |
 | `refresh` | `interval` | `refresh=45` |
-| `provider` | `source` | `provider=v6.vbb.transport.rest` |
+| `provider` | `source` | `provider=v6.db.transport.rest` |
 | `filter` | `filters` | `filter=subway,tram` (everything else off) |
 | `scroll` / `scrollSpeed` | — | `scroll=0`, `scrollSpeed=5000` |
 | `left` / `right` | — | Station IDs for the split panes |
@@ -424,14 +424,28 @@ bvg-display/
 
 Uses the public [transport.rest](https://transport.rest/) APIs:
 
-| Endpoint | Coverage |
-|----------|----------|
-| `v6.bvg.transport.rest` | Berlin (BVG) |
-| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) |
+| Endpoint | Coverage | Live vehicles | Search by line |
+|----------|----------|---------------|----------------|
+| `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
+| `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
+| `v6.db.transport.rest` | Germany (DB) | no | no |
 
 - No API key required
 - Rate limit: ~100 requests/minute
 - CORS enabled (browser-friendly)
+
+All three speak the same request and response shape, so switching sources is a
+base-URL swap. They are not the same backend, though: the BVG and VBB endpoints
+are HAFAS deployments, while the DB one was migrated to `db-vendo-client` after
+Deutsche Bahn retired its HAFAS endpoint, and that client has no equivalent for
+`/radar` or `/trips?lineName=`.
+
+Rather than let those calls fail, each provider declares what it supports in
+`PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
+unsupported endpoint are refused before a request goes out, and
+`applyProviderCapabilities()` (`js/app.js`) hides the two map controls that
+depend on them. Departure boards, journey planning, station and place search and
+route shapes work on every source.
 
 Endpoints used:
 

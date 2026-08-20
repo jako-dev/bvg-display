@@ -1202,6 +1202,13 @@ input.walk-time-input {
 
 .map-status.is-warning { color: var(--warn); }
 
+/* Not every data source answers every call: the nationwide DB endpoint has no
+   live-vehicle feed and no search-by-line. Hide those controls rather than
+   leave them to fail — see applyProviderCapabilities() in app.js. */
+body[data-radar="no"] .map-live,
+body[data-radar="no"] .map-filters,
+body[data-line-search="no"] .map-line-search { display: none; }
+
 .map-view { position: relative; }
 
 .map-container {
