@@ -122,6 +122,7 @@
         alertsBanner: document.getElementById('alerts-banner'),
         apiProviderSelect: document.getElementById('api-provider'),
         providerHint: document.getElementById('provider-hint'),
+        dataAttribution: document.getElementById('data-attribution'),
         departureCountSelect: document.getElementById('departure-count'),
         refreshIntervalInput: document.getElementById('refresh-interval'),
         themeDark: document.getElementById('theme-dark'),
@@ -209,6 +210,15 @@
 
         if (state.kioskMode) {
             enterKioskMode(false); // restore without hint
+        }
+
+        // config.json and the URL name stations in whichever backend's IDs their
+        // author had in hand — a Home Assistant card built against BVG, say,
+        // pointed at a source that has never heard of those IDs. Re-point them
+        // before the first fetch rather than after it, so the board's first
+        // paint is departures and not an error that fixes itself a second later.
+        if (state.stations.some(station => station.id && !BvgApi.isNativeStationId(station.id))) {
+            await remapStationsForProvider();
         }
 
         // Lay the view out and load it once — applyViewMode does the initial fetch.
@@ -467,7 +477,7 @@
             saveState();
             updateDataSourceLabel();
             applyProviderCapabilities();
-            refreshCurrentView();
+            switchProviderData();
         });
 
         // Departure count
@@ -752,7 +762,7 @@
             updateDataSourceLabel();
             applyProviderCapabilities();
             clearBoardMessage();
-            refreshCurrentView();
+            switchProviderData();
         });
 
         // Kiosk mode
@@ -888,6 +898,84 @@
      * real names up in the background and refresh the labels once they land —
      * the board itself already works, the ID is just an ugly placeholder.
      */
+    /**
+     * Re-point the saved stations at the selected backend.
+     *
+     * Station IDs are not portable: transport.rest speaks bare numeric HAFAS
+     * IDs, MOTIS speaks the source dataset's ID behind a feed tag. Switching
+     * source with the old IDs in place gives an empty board and no explanation,
+     * so each station is looked up again by the name it was saved under and the
+     * best matching stop takes its place.
+     *
+     * Only IDs are rewritten — names and walking times are the user's, and are
+     * kept exactly as they were.
+     *
+     * @returns {Promise<boolean>} whether anything moved
+     */
+    async function remapStationsForProvider() {
+        const stale = state.stations.filter(station =>
+            station.id && station.name && station.name !== station.id
+            && !BvgApi.isNativeStationId(station.id));
+        if (stale.length === 0) return false;
+
+        const label = BvgApi.getCapabilities().label;
+        showBoardMessage(`Stationen werden auf ${escapeHtml(label)} übertragen…`);
+
+        const remap = new Map();
+        for (const station of stale) {
+            try {
+                const hits = await BvgApi.searchStations(station.name);
+                const hit = hits.find(h => h && h.id);
+                if (!hit) continue;
+                remap.set(station.id, hit.id);
+                station.id = hit.id;
+                const loc = hit.location;
+                if (loc && isFinite(loc.latitude) && isFinite(loc.longitude)) {
+                    station.lat = loc.latitude;
+                    station.lng = loc.longitude;
+                }
+            } catch (e) {
+                console.warn(`Could not re-resolve "${station.name}":`, e.message);
+            }
+        }
+
+        // Anything that failed to find a counterpart would otherwise sit in the
+        // list looking fine and loading nothing.
+        const dropped = state.stations.filter(station =>
+            station.id && !BvgApi.isNativeStationId(station.id));
+        state.stations = state.stations.filter(station => !dropped.includes(station));
+
+        // Every other reference is by ID, so they all have to follow.
+        for (const key of ['activeStationId', 'splitLeftId', 'splitRightId', 'homeStationId']) {
+            if (remap.has(state[key])) state[key] = remap.get(state[key]);
+            else if (state[key] && !BvgApi.isNativeStationId(state[key])) state[key] = null;
+        }
+        if (state.destination && state.destination.id && !BvgApi.isNativeStationId(state.destination.id)) {
+            state.destination = remap.has(state.destination.id)
+                ? { ...state.destination, id: remap.get(state.destination.id) }
+                : null;
+        }
+        state.favourites = state.favourites.filter(fav =>
+            !fav.id || BvgApi.isNativeStationId(fav.id) || remap.has(fav.id));
+        state.favourites = state.favourites.map(fav =>
+            fav.id && remap.has(fav.id) ? { ...fav, id: remap.get(fav.id) } : fav);
+
+        reconcileStationSelection();
+        renderSavedStations();
+        renderSplitStationSelects();
+        renderStationTabs();
+        renderJourneyControls();
+        renderFavourites();
+        saveState();
+        clearBoardMessage();
+
+        if (dropped.length > 0) {
+            showBoardMessage(`Auf ${escapeHtml(label)} nicht gefunden: `
+                + escapeHtml(dropped.map(d => d.name).join(', ')) + '.');
+        }
+        return true;
+    }
+
     async function resolveStationNames() {
         // Config-supplied stations arrive as bare IDs, and stations saved before
         // coordinates were stored have a name but no position — both need a
@@ -1261,6 +1349,17 @@
         dom.lastUpdate.textContent = `Letzte Aktualisierung: ${now}`;
     }
 
+    /**
+     * Reload everything the new source has to answer for. The remap runs first
+     * because a board fetched with the previous source's IDs would come back
+     * empty and be indistinguishable from an outage.
+     */
+    async function switchProviderData() {
+        await remapStationsForProvider();
+        resolveStationNames();
+        refreshCurrentView();
+    }
+
     function updateDataSourceLabel() {
         dom.dataSource.textContent = `Daten: ${BvgApi.getCapabilities().label || 'BVG / VBB'}`;
     }
@@ -1293,14 +1392,35 @@
             dom.mapLineResults.classList.add('hidden');
         }
 
+        // Some sources index addresses and points of interest themselves, so
+        // the third-party geocoder is pure extra traffic while they are on.
+        Geocoder.configure({ enabled: state.useGeocoder && caps.geocoder !== 'builtin' });
+
+        // Donated data comes with attribution conditions; honour them visibly.
+        document.body.dataset.attribution = caps.attribution ? 'required' : 'none';
+        if (caps.attribution) {
+            dom.dataAttribution.textContent = caps.attribution.text;
+            dom.dataAttribution.href = caps.attribution.url;
+            dom.dataAttribution.classList.remove('hidden');
+        } else {
+            dom.dataAttribution.classList.add('hidden');
+        }
+
+        // The poll rate is the provider's, so a running timer is now wrong.
+        if (state.viewMode === 'map' && state.mapLive && caps.radar) startRadarTimer();
+
         const missing = [
             caps.radar ? '' : 'Live-Fahrzeuge',
             caps.lineSearch ? '' : 'Liniensuche'
         ].filter(Boolean);
 
-        dom.providerHint.textContent = missing.length
-            ? `Deckt ${caps.area} ab, liefert aber keine ${missing.join(' und keine ')}.`
-            : `Deckt ${caps.area} ab.`;
+        const seconds = Math.round((caps.radarIntervalMs || RADAR_INTERVAL_MS) / 1000);
+        dom.providerHint.textContent = [
+            missing.length
+                ? `Deckt ${caps.area} ab, liefert aber keine ${missing.join(' und keine ')}.`
+                : `Deckt ${caps.area} ab.`,
+            caps.radar ? `Live-Fahrzeuge alle ${seconds} s.` : ''
+        ].filter(Boolean).join(' ');
 
         // The status line may still be showing a vehicle count from the
         // provider we just left.
@@ -2015,6 +2135,9 @@
         try {
             const data = await BvgApi.getRadar(bounds, {
                 results: RADAR_MAX_VEHICLES,
+                // MOTIS filters by zoom (long distance only when far out); the
+                // transport.rest endpoints ignore it.
+                zoom: TransitMap.getZoom(),
                 // Positions are drawn once per poll, so the movement frames the
                 // API can compute are payload we'd never read.
                 duration: 10,
@@ -2177,10 +2300,17 @@
         return /^[us]\d+$/.test(clean) ? clean : '';
     }
 
+    /**
+     * The poll rate belongs to the provider, not to the app: 10s against a
+     * transport.rest endpoint is ordinary, while Transitous is donated
+     * infrastructure that asks to be treated gently, so it polls at 30s.
+     */
     function startRadarTimer() {
         stopRadarTimer();
         if (!state.mapLive) return;
-        radarTimer = setInterval(fetchRadar, RADAR_INTERVAL_MS);
+        const caps = BvgApi.getCapabilities();
+        if (!caps.radar) return;
+        radarTimer = setInterval(fetchRadar, caps.radarIntervalMs || RADAR_INTERVAL_MS);
     }
 
     function stopRadarTimer() {
