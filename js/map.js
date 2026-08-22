@@ -58,7 +58,53 @@ const TransitMap = (() => {
     // drawing a new route doesn't wipe them.
     let scene = { routes: [], stops: [], vehicles: [], pins: [], focus: null };
 
+    /**
+     * Fallback only — the real palette lives in css/styles.css on `.line-tint`,
+     * where the board badge and the journey chip read it from. This is what a
+     * product falls back to if the stylesheet has nothing for it.
+     */
     const productColor = (product) => PRODUCT_COLORS[product] || '#6b7785';
+
+    /**
+     * The colour a line is drawn in, taken from the same stylesheet rule the
+     * board badge uses.
+     *
+     * Keeping a second table here is what made a U5 brown on the board and blue
+     * on the map. Instead a probe element is given the badge's own classes and
+     * its computed background is read back, so the two cannot disagree: change
+     * the CSS and both follow.
+     */
+    const colorCache = new Map();
+    let colorProbe = null;
+
+    /** Mirrors the badge class in the stylesheet: a specific U- or S-Bahn line. */
+    function lineClassName(name) {
+        const clean = String(name || '').toLowerCase().replace(/\s+/g, '');
+        return /^[us]\d+$/.test(clean) ? clean : '';
+    }
+
+    function lineColor(product, name) {
+        const line = lineClassName(name);
+        const key = `${product || ''}|${line}`;
+        if (colorCache.has(key)) return colorCache.get(key);
+
+        if (!colorProbe) {
+            colorProbe = document.createElement('span');
+            colorProbe.setAttribute('aria-hidden', 'true');
+            colorProbe.style.cssText = 'position:absolute;left:-9999px;top:0;width:0;height:0;';
+            document.body.appendChild(colorProbe);
+        }
+        colorProbe.className = `line-tint ${product || ''} ${line}`.trim();
+        const resolved = window.getComputedStyle(colorProbe).backgroundColor;
+
+        // Transparent means the stylesheet has no rule for this combination —
+        // an unknown product, or a line with no colour of its own.
+        const color = (resolved && !/^rgba\(0, 0, 0, 0\)$|^transparent$/.test(resolved))
+            ? resolved
+            : productColor(product);
+        colorCache.set(key, color);
+        return color;
+    }
 
     // ===== Leaflet loading =====
 
@@ -155,6 +201,7 @@ const TransitMap = (() => {
 
             staticLayer = L.layerGroup().addTo(map);
             vehicleLayer = L.layerGroup().addTo(map);
+            map.on('moveend', handleMoveEnd);
             mode = 'leaflet';
 
             // Leaflet measures the container on creation; in a view that was
@@ -304,7 +351,7 @@ const TransitMap = (() => {
 
         for (const route of scene.routes) {
             L.polyline(route.points, {
-                color: productColor(route.product),
+                color: route.color || lineColor(route.product, route.label),
                 weight: route.dashed ? 3 : 5,
                 opacity: route.dashed ? 0.75 : 0.85,
                 dashArray: route.dashed ? '6 8' : null,
@@ -393,7 +440,7 @@ const TransitMap = (() => {
         const L = window.L;
         const icon = L.divIcon({
             className: 'map-vehicle-icon',
-            html: `<span class="map-vehicle" style="--vehicle-color:${productColor(vehicle.product)}">${escapeHtml(vehicle.label)}</span>`,
+            html: `<span class="map-vehicle" style="--vehicle-color:${lineColor(vehicle.product, vehicle.label)}">${escapeHtml(vehicle.label)}</span>`,
             iconSize: null
         });
         return L.marker([vehicle.lat, vehicle.lng], { icon, keyboard: false })
@@ -407,7 +454,7 @@ const TransitMap = (() => {
 
         const dot = document.createElementNS(ns, 'circle');
         dot.setAttribute('r', '9');
-        dot.setAttribute('fill', productColor(vehicle.product));
+        dot.setAttribute('fill', lineColor(vehicle.product, vehicle.label));
         dot.setAttribute('stroke', 'var(--map-stop-ring, #ffffff)');
         dot.setAttribute('stroke-width', '2');
 
@@ -499,7 +546,7 @@ const TransitMap = (() => {
             add('polyline', {
                 points: route.points.map(project).map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' '),
                 fill: 'none',
-                stroke: productColor(route.product),
+                stroke: route.color || lineColor(route.product, route.label),
                 'stroke-width': route.dashed ? 3 : 5,
                 'stroke-linejoin': 'round',
                 'stroke-linecap': 'round',
@@ -553,6 +600,28 @@ const TransitMap = (() => {
     }
 
     /**
+     * Called after every settled pan or zoom, whoever caused it.
+     *
+     * Deliberately not filtered to user gestures: the caller uses this to
+     * decide whether an offer is still relevant, not to fetch anything, and a
+     * programmatic fit — flying to a route the user just picked — moves the
+     * view just as much as a drag does.
+     *
+     * @param {function({north,south,east,west}): void} callback
+     */
+    function onMoveEnd(callback) {
+        moveEndCallback = typeof callback === 'function' ? callback : null;
+    }
+
+    let moveEndCallback = null;
+
+    function handleMoveEnd() {
+        if (!moveEndCallback) return;
+        const bounds = getBounds();
+        if (bounds) moveEndCallback(bounds);
+    }
+
+    /**
      * Current zoom, for backends that use it to decide how much to send.
      * Null on the schematic fallback, where there is no tile pyramid.
      * @returns {number|null}
@@ -594,6 +663,7 @@ const TransitMap = (() => {
         init,
         getBounds,
         getZoom,
+        onMoveEnd,
         setRoutes,
         setStops,
         setPins,
@@ -603,6 +673,7 @@ const TransitMap = (() => {
         refresh,
         destroy,
         productColor,
+        lineColor,
         getMode: () => mode
     };
 })();
