@@ -23,20 +23,20 @@ Inspired by [T-Skylt](https://shop.t-skylt.se/products/t-skylt-x-silver-metallic
 
 ### Features
 
-- **Real-time departures** from any BVG/VBB station
+- **Real-time departures** from any stop in Germany
 - **Multi-station** support with tabs
 - **Per-station walk time** — hides departures you can't reach in time (the lookahead window and result count are widened automatically so the board stays full)
 - **Transport filters** — S-Bahn, U-Bahn, Tram, Bus, Ferry, Regional
 - **Delay highlighting** — red for delays, green for on-time, strikethrough for cancelled
 - **Service alerts** — disruption banners
 - **Journey planner** — from your "home" station *or a street address* to anywhere in the network, including places that aren't stops: "Markthalle 9" works as a destination, and the walks at both ends are planned as real legs
-- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Falls back to a self-contained schematic when map tiles aren't reachable
+- **Map** — show any line's route and stops by name (`M10`, `U5`, `S41`), the route of any departure, the legs of any connection, and live vehicles. Scroll off the loaded area and a button offers to reload vehicles for where you are looking. Falls back to a self-contained schematic when map tiles aren't reachable
 - **View switch in the header** — board, split, journey, map and LED, one click apart
 - **Views**: Single, Split (two stations side-by-side, each independently selectable), Verbindung (journey planner), Karte (map), LED emulator
 - **Themes**: Dunkel, Modern
 - **Kiosk mode** — fullscreen for wall-mounted tablets
 - **Auto-refresh** — configurable interval (10–120s)
-- **Data source selector** — BVG or VBB
+- **Data source selector** — Transitous (nationwide, the default), DB, BVG or VBB
 - **Installable** — add-to-home-screen / installable as a standalone app, with the app shell cached for offline startup (live departure data always requires a connection)
 - **Offline-capable settings** — all settings persisted in localStorage
 - **Preconfigured stations** — ship default stations with the deployment (`config.json`) or pass them per URL, so a client that has never set anything up still sees a full board — see [Preconfigured Stations](#preconfigured-stations)
@@ -429,7 +429,7 @@ Uses the public [transport.rest](https://transport.rest/) endpoints and
 
 | Endpoint | Coverage | Live vehicles | Search by line |
 |----------|----------|---------------|----------------|
-| `api.transitous.org` **(default)** | Germany and neighbours | yes | no |
+| `api.transitous.org` **(default)** | Germany and neighbours | yes | yes, map-scoped |
 | `v6.db.transport.rest` | Germany (DB) | no | no |
 | `v6.bvg.transport.rest` | Berlin (BVG) | yes | yes |
 | `v6.vbb.transport.rest` | Berlin + Brandenburg (VBB) | yes | yes |
@@ -461,7 +461,55 @@ app renders. Two things there are worth knowing:
   so the separate Photon lookup is switched off while it is selected.
 - `map/trips` returns trip *segments* with a departure, an arrival and a shape,
   not vehicle positions. A position is interpolated along the shape for the
-  current moment, the way MOTIS's own map does it.
+  current moment, the way MOTIS's own map does it. Its `precision` parameter —
+  which sets how many decimal places the shapes are encoded with — is
+  deliberately left alone: the response does not say which value was used, so
+  asking for fewer places to save bandwidth means decoding against a number the
+  client only assumes, and being wrong by one divides every coordinate by ten.
+  Positions that land outside the requested box are discarded rather than
+  drawn, so a mis-scale shows up as "no vehicles" instead of a fleet in the
+  Atlantic.
+- There is no search-by-line-name endpoint, so the line lookup reads
+  `map/routes` — every route in a box around what is on screen — and filters by
+  name locally. That makes it **map-scoped rather than network-wide**: a line
+  running on the other side of the country is not found until you pan there.
+  In exchange it draws the *scheduled* route rather than a running vehicle's
+  track, so a line that is not operating right now still shows where it goes.
+  `getCapabilities().lineSearchScope` is `'map'` there and `'network'` on the
+  transport.rest endpoints; the field's placeholder and its empty state say
+  which is in force.
+- MOTIS holds one line as **several routes** — one per distinct stop sequence,
+  so each direction and every short working is its own entry. Drawing any one
+  of them draws part of the line. The search pools their segments,
+  deduplicates the shared hops and offers **one row per line**, drawn end to
+  end. Pooling is keyed on the route's own id rather than the name printed on
+  it: two operators can both run an "M10", and pooling by name drew one line's
+  arms onto the other.
+- Hops not connected to the rest of the line are dropped — a depot spur kept as
+  its own pattern, a corridor left over from an old routing. A line is one
+  connected thing, so only its largest connected group of hops is drawn.
+- A line is **not always one path**. RNV 5 in Mannheim is a ring, and plenty of
+  lines have a branch or a spur, so the pooled hops are chained into as few
+  continuous runs as possible and every one of them is drawn — reducing a line
+  to its single longest walk drew a ring as a semicircle. Stops that end the
+  line (degree one in the pooled hops) are labelled permanently; a ring has
+  none and gets none.
+- The search request is deliberately small — a box of a few kilometres up to
+  ~20 × 20 km around the view. It only has to *find* the line: when one is
+  picked, its full geometry is fetched per stop pattern from
+  `map/route-details`, which is **not box-limited**, so the drawn line runs to
+  its real ends however far away they are. (An earlier design fetched geometry
+  from the search request itself and grew the box to ~55 × 60 km to
+  compensate, which asked MOTIS for every route in a quarter of a Bundesland
+  and made searches slow and prone to timeouts.) At most four patterns are
+  fetched in full per line; the search response's own partial data is merged
+  in as a supplement, and if `route-details` is unavailable — it is an
+  experimental endpoint — the line degrades to what the search saw instead of
+  to nothing. Assembled lines are cached, so re-drawing one costs no requests.
+- Matching is **ranked substring**: exact short name, then prefix, then
+  substring, and the long name last. So "5" still puts line 5 above RNV 5,
+  "rnv" finds every RNV line, and "ringlinie" finds one by its description.
+  Capped at the closest eight lines.
 
 Rather than let unsupported calls fail, each provider declares what it supports
 in `PROVIDERS` (`js/api.js`). `BvgApi.getCapabilities()` reports it, calls to an
@@ -530,6 +578,54 @@ the map toolbar.
 that, and what comes back is then an arbitrary slice that differs poll to poll —
 so the toolbar says *Ausschnitt* when the cap is reached. Zooming in narrows the
 bounding box and gets you a complete picture of a smaller area.
+
+A poll covers one bounding box — the map's own view widened by a quarter of its
+span on each side, so vehicles just off the edge are already loaded and a small
+pan does not blank them in. Scroll far enough that the view leaves that box and
+a **Fahrzeuge hier laden** button appears over the map; the vehicles on screen
+came from somewhere else, and without the offer an empty map reads as a bug
+rather than a boundary.
+
+The reload is a button rather than an automatic re-poll on every pan. Driving
+the fetch from map movement is what previously made a single click fire several
+requests, because a programmatic fit to a new route moves the map exactly as a
+drag does.
+
+It also clears the line focus. While a line or a connection is shown, live
+vehicles are narrowed to it — so somewhere that line does not run, a reload
+would fetch a full response and draw none of it. The route stays on the map;
+the narrowing does not.
+
+#### What this does not do
+
+A line's own data still holds more than the line most people mean: branches and
+short workings are drawn along with the trunk, because nothing in `map/routes`
+says which is which. Telling them apart properly needs trip frequencies — how
+many services actually run each pattern — which this endpoint does not carry.
+Two heuristics were tried and both made it worse: the longest walk through the
+hops cuts a ring in half, and preferring the straightest continuation at a
+junction follows a branch wherever the line doubles back on itself.
+
+Long-distance geometry now comes from `map/route-details` rather than the
+search box, so a line is no longer clipped at the box edge. The remaining limit
+is *finding* the line: it has to run somewhere near what is on screen for the
+search to see it at all.
+
+### Line colours
+
+They live in one place: `.line-tint` in `css/styles.css`. Seven product
+families plus every individual U-Bahn and S-Bahn line, taken from BVG's own
+palette and held one step back from full saturation so a full board does not
+turn into a colour chart.
+
+The map reads that same rule rather than keeping a table of its own — a probe
+element is given the badge's classes and its computed background is read back
+(`TransitMap.lineColor`). A second table is what made a U5 brown on the board
+and blue on the map. Change the CSS and the badge, the journey chip, the drawn
+route and the live vehicle labels all follow.
+
+A line with no rule of its own falls back to its product's colour, and an
+unknown product to a neutral grey.
 
 ### Map tiles
 

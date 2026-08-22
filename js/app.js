@@ -17,6 +17,10 @@
     const MAX_ALERTS = 3;
     const DELAY_THRESHOLD_SEC = 60; // Above this a departure counts as delayed
     const SEARCH_DEBOUNCE_MS = 300;
+    // The line lookup asks for every route in a box, which is a far heavier
+    // request than a name lookup — worth waiting until the typing has actually
+    // stopped rather than firing on the way to "M10".
+    const LINE_DEBOUNCE_MS = 1000;
     const VIEW_MODES = ['single', 'split', 'journey', 'map', 'led'];
     const RADAR_INTERVAL_MS = 30000; // Live vehicle poll — one request per tick
     // The API's own maximum. Anything lower and a busy viewport comes back as
@@ -24,6 +28,8 @@
     // vehicles randomly appearing and vanishing, and like a journey's later
     // legs having no vehicles at all.
     const RADAR_MAX_VEHICLES = 256;
+    // Fraction of the viewport's own span added on each side of a radar query.
+    const RADAR_BOUNDS_MARGIN = 0.25;
     const MAX_FAVOURITES = 8;
 
     // ===== State =====
@@ -80,6 +86,9 @@
     let selectedJourney = -1;
     let radarTimer = null;
     let mapHasRoutes = false;
+    // The box the vehicles on screen were actually fetched for. Panning away
+    // from it is what makes the reload offer meaningful.
+    let radarFetchedBounds = null;
     let mapReady = false;
     let mapInitPromise = null;
     let shownRoute = null;   // { tripId, label } of the trip route on the map
@@ -171,6 +180,7 @@
         mapLineResults: document.getElementById('map-line-results'),
         mapFilters: document.getElementById('map-filters'),
         mapFit: document.getElementById('map-fit'),
+        mapReloadArea: document.getElementById('map-reload-area'),
         mapClear: document.getElementById('map-clear'),
         mapStatus: document.getElementById('map-status'),
         viewSwitch: document.getElementById('view-switch'),
@@ -672,8 +682,10 @@
             } else {
                 stopRadarTimer();
                 liveVehicles = [];
+                radarFetchedBounds = null;
                 TransitMap.setVehicles([]);
             }
+            updateReloadAreaOffer();
         });
         // Show any line's route by name — independent of the saved stations and
         // of what happens to be on screen.
@@ -685,7 +697,22 @@
                 dom.mapLineResults.classList.add('hidden');
                 return;
             }
-            lineTimeout = setTimeout(() => searchMapLine(query), SEARCH_DEBOUNCE_MS);
+            lineTimeout = setTimeout(() => searchMapLine(query), LINE_DEBOUNCE_MS);
+        });
+
+        // Clicking the map — to pan or zoom while deciding — hides the
+        // dropdown via the document-level close-on-outside-click above, and
+        // nothing used to bring it back: the input event only fires when the
+        // text changes, and it hadn't. Focusing the field again re-shows what
+        // the last search found, or re-runs it if there is nothing to show.
+        dom.mapLineInput.addEventListener('focus', () => {
+            const query = dom.mapLineInput.value.trim();
+            if (!query) return;
+            if (dom.mapLineResults.children.length > 0) {
+                dom.mapLineResults.classList.remove('hidden');
+            } else {
+                searchMapLine(query);
+            }
         });
 
         dom.mapLineInput.addEventListener('keydown', (e) => {
@@ -715,6 +742,11 @@
         });
 
         dom.mapFit.addEventListener('click', () => TransitMap.fit());
+        dom.mapReloadArea.addEventListener('click', reloadRadarForView);
+
+        // Any settled move can make the offer relevant — a drag, a zoom, or
+        // flying to a route the user just picked.
+        TransitMap.onMoveEnd(() => updateReloadAreaOffer());
         dom.mapClear.addEventListener('click', () => {
             shownRoute = null;
             selectedJourney = -1;
@@ -1406,12 +1438,18 @@
             stopRadarTimer();
             liveVehicles = [];
             radarTruncated = false;
+            radarFetchedBounds = null;
             TransitMap.setVehicles([]);
         }
+        updateReloadAreaOffer();
 
         if (!caps.lineSearch) {
             dom.mapLineInput.value = '';
             dom.mapLineResults.classList.add('hidden');
+        } else {
+            dom.mapLineInput.placeholder = caps.lineSearchScope === 'map'
+                ? 'Linie im Ausschnitt, z.B. M10'
+                : 'Linie anzeigen, z.B. M10';
         }
 
         // Some sources index addresses and points of interest themselves, so
@@ -1522,6 +1560,8 @@
     // ===== View Mode =====
     function applyViewMode(mode, { persist = true } = {}) {
         state.viewMode = mode;
+        // The offer belongs to the map; it must not survive leaving it.
+        if (mode !== 'map') dom.mapReloadArea.classList.add('hidden');
         // Exposed for CSS: some chrome is redundant in some views and only
         // worth hiding there (the app title means nothing in split view,
         // where each pane is already labelled with its station).
@@ -2094,24 +2134,56 @@
             if (token !== requestToken || !shownRoute || shownRoute.tripId !== tripId) return;
 
             const trip = data.trip || {};
-            const points = TransitApi.polylineToLatLngs(trip.polyline);
-            if (points.length < 2) {
+            const product = (trip.line && trip.line.product) || '';
+            const lineName = (trip.line && trip.line.name) || '';
+
+            // A whole line can be several separate runs — a ring closes on
+            // itself, a branch leaves the trunk — so it arrives as a list of
+            // shapes. A single trip is just the one.
+            const shapes = (Array.isArray(trip.polylines) && trip.polylines.length)
+                ? trip.polylines
+                : [trip.polyline];
+
+            const routes = shapes
+                .map(shape => ({ points: TransitApi.polylineToLatLngs(shape), product, label: lineName }))
+                .filter(route => route.points.length >= 2);
+
+            if (routes.length === 0) {
                 setMapStatus('Für diese Fahrt liegt keine Route vor.', true);
                 return;
             }
 
-            const stations = TransitApi.polylineStations(trip.polyline);
-            setMapTitle(label || `${(trip.line && trip.line.name) || ''} ${trip.direction || ''}`.trim());
+            // Shared stops appear in every run that touches them.
+            const stations = [];
+            const seenStops = new Set();
+            for (const shape of shapes) {
+                for (const station of TransitApi.polylineStations(shape)) {
+                    const key = station.id || `${station.lat},${station.lng}`;
+                    if (seenStops.has(key)) continue;
+                    seenStops.add(key);
+                    stations.push(station);
+                }
+            }
+
+            setMapTitle(label || `${lineName} ${trip.direction || ''}`.trim());
             // From here on, "live" means this line rather than the whole city.
-            setMapFocus([(trip.line && trip.line.name) || '']);
-            drawRoutes([{
-                points,
-                product: (trip.line && trip.line.product) || '',
-                label: (trip.line && trip.line.name) || ''
-            }]);
+            setMapFocus([lineName]);
+            drawRoutes(routes);
+
+            // Which stops are ends is a property of the line, not of the order
+            // the runs happen to be in — and a ring has none at all.
+            // An empty list means "worked it out, there are none" — a ring —
+             // which is different from a source that does not report termini at
+             // all. Only the latter falls back to the ends of the drawn path.
+            const knowsTermini = Array.isArray(trip.termini);
+            const ends = new Set((trip.termini || []).map(t => t.id || `${t.lat},${t.lon}`));
+            const isEnd = (station, index) => knowsTermini
+                ? ends.has(station.id || `${station.lat},${station.lng}`)
+                : (routes.length === 1 && (index === 0 || index === stations.length - 1));
+
             TransitMap.setStops(stations.map((st, i) => ({
                 lat: st.lat, lng: st.lng, name: st.name,
-                kind: i === 0 ? 'origin' : (i === stations.length - 1 ? 'destination' : 'stop')
+                kind: isEnd(st, i) ? 'destination' : 'stop'
             })));
             TransitMap.fit();
         } catch (e) {
@@ -2124,6 +2196,12 @@
     /**
      * Bounding box for the radar query. Prefers what the map is showing;
      * falls back to a box around the saved stations before the map has a size.
+     *
+     * The map's own box is widened by a margin rather than used as-is. That
+     * buys two things: vehicles just off the edge are already loaded, so a
+     * small pan does not blank them in, and the "these vehicles are from
+     * somewhere else" offer only appears once the view has genuinely left the
+     * area — with an exact box, nudging the map by a few pixels would trip it.
      */
     function radarBounds() {
         const points = [];
@@ -2132,7 +2210,7 @@
         }
 
         const mapBounds = TransitMap.getBounds && TransitMap.getBounds();
-        if (mapBounds) return mapBounds;
+        if (mapBounds) return padBounds(mapBounds, RADAR_BOUNDS_MARGIN);
         if (points.length === 0) return null;
 
         const lats = points.map(p => p[0]);
@@ -2173,13 +2251,82 @@
             // of it — worth saying, because the missing vehicles are otherwise
             // indistinguishable from ones that aren't running.
             radarTruncated = movements.length >= RADAR_MAX_VEHICLES;
+            radarFetchedBounds = bounds;
             liveVehicles = movements.map(toVehicle).filter(v => isFinite(v.lat) && isFinite(v.lng));
             applyMapFilters();
+            updateReloadAreaOffer();
             updateLastRefreshTime();
         } catch (e) {
             console.warn('Radar poll failed:', e.message);
             setMapStatus(`Live-Fahrzeuge nicht verfügbar: ${e.message}`, true);
         }
+    }
+
+    /**
+     * Offer to re-fetch when the map has been panned off the area the vehicles
+     * came from.
+     *
+     * The poll asks for one bounding box, so vehicles outside it were never in
+     * the answer — scrolling to a new part of the city shows an empty map that
+     * looks like a bug rather than a boundary. Rather than re-polling on every
+     * pan, which is what made a single click fire several requests the last
+     * time the map drove its own fetching, the user is offered the reload and
+     * decides.
+     *
+     * Shown only once the view has actually left the fetched box: a small
+     * nudge inside it changes nothing about what is on screen.
+     */
+    function updateReloadAreaOffer() {
+        dom.mapReloadArea.classList.toggle('hidden', !radarIsStale());
+        // Panning does not change the markers, but it does change whether the
+        // count still describes anything on screen.
+        refreshLiveNote();
+    }
+
+    /**
+     * Are the loaded vehicles from somewhere other than what is on screen?
+     *
+     * True once the view has left the box they were fetched for — which is both
+     * when to offer a reload and when the count on the status line stops
+     * describing anything the user can see.
+     */
+    function radarIsStale() {
+        const caps = TransitApi.getCapabilities();
+        if (state.viewMode !== 'map' || !state.mapLive || !caps.radar) return false;
+        const view = TransitMap.getBounds();
+        return !!(view && radarFetchedBounds && !containsBounds(radarFetchedBounds, view));
+    }
+
+    /** Grow a box by a fraction of its own span on every side. */
+    function padBounds(bounds, fraction) {
+        const padLat = Math.abs(bounds.north - bounds.south) * fraction;
+        const padLon = Math.abs(bounds.east - bounds.west) * fraction;
+        return {
+            north: bounds.north + padLat, south: bounds.south - padLat,
+            east: bounds.east + padLon, west: bounds.west - padLon
+        };
+    }
+
+    /** Is `inner` entirely within `outer`? A hair of tolerance for rounding. */
+    function containsBounds(outer, inner) {
+        const e = 1e-6;
+        return inner.north <= outer.north + e && inner.south >= outer.south - e
+            && inner.east <= outer.east + e && inner.west >= outer.west - e;
+    }
+
+    async function reloadRadarForView() {
+        dom.mapReloadArea.disabled = true;
+        // "Fahrzeuge hier laden" has to mean what it says. While a line or a
+        // connection is shown, live vehicles are narrowed to it — so somewhere
+        // that line does not run, a reload fetched a full response and drew
+        // none of it. The route stays on the map; the narrowing does not.
+        setMapFocus([]);
+        try {
+            await fetchRadar();
+        } finally {
+            dom.mapReloadArea.disabled = false;
+        }
+        updateReloadAreaOffer();
     }
 
     /**
@@ -2216,15 +2363,28 @@
         TransitMap.setRoutes(list);
     }
 
-    function applyMapFilters() {
-        const focused = mapFocus && mapFocus.lines && mapFocus.lines.size > 0;
-        const vehicles = liveVehicles.filter(v => focused
+    /** Is the map currently narrowed to particular lines? */
+    const mapIsFocused = () => !!(mapFocus && mapFocus.lines && mapFocus.lines.size > 0);
+
+    /** The loaded vehicles that the current focus or product filter lets through. */
+    function filteredVehicles() {
+        const focused = mapIsFocused();
+        return liveVehicles.filter(v => focused
             ? mapFocus.lines.has(normaliseLine(v.label))
             : state.mapFilters[v.product] !== false);
+    }
 
+    function applyMapFilters() {
+        const vehicles = filteredVehicles();
         TransitMap.setVehicles(vehicles);
-        dom.mapFilters.classList.toggle('is-muted', !!focused);
-        updateLiveNote(focused, vehicles.length);
+        dom.mapFilters.classList.toggle('is-muted', mapIsFocused());
+        refreshLiveNote(vehicles.length);
+    }
+
+    /** Restate what "live" means without touching the markers. */
+    function refreshLiveNote(count) {
+        updateLiveNote(mapIsFocused(),
+            typeof count === 'number' ? count : filteredVehicles().length);
     }
 
     const normaliseLine = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -2243,9 +2403,22 @@
     function updateLiveNote(focused, count) {
         let live = '';
         if (state.mapLive && TransitApi.getCapabilities().radar) {
-            if (focused) live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
-            else if (count > 0) live = `Live: ${count} Fahrzeuge`;
-            if (live && radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            if (radarIsStale()) {
+                // Reporting a count for vehicles that are all off screen reads
+                // as "they are here somewhere"; they are not, and the button
+                // over the map is what fixes it.
+                live = 'Fahrzeuge stammen aus einem anderen Bereich';
+            } else if (focused) {
+                live = `Live: ${[...mapFocus.lines].join(', ').toUpperCase()} (${count})`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (count > 0) {
+                live = `Live: ${count} Fahrzeuge`;
+                if (radarTruncated) live += ' · Ausschnitt, näher heranzoomen';
+            } else if (radarFetchedBounds) {
+                // A poll that found nothing is a fact worth stating: silence
+                // next to an empty map is indistinguishable from a failure.
+                live = 'Keine Fahrzeuge in diesem Bereich';
+            }
         } else if (!TransitApi.getCapabilities().radar && !mapHasRoutes) {
             // No live feed on this source, so an empty map is the normal state
             // rather than a failure — point at what does put something on it.
@@ -2270,26 +2443,45 @@
      * is why a line that happens not to be running past you was missing from
      * the old picker. /trips searches by line name across the whole network.
      */
+    /**
+     * Why a line was not found, which depends on how the backend looks.
+     * A network-wide search misses a line that is not running; a map-scoped one
+     * misses a line that is not near what you are looking at, and panning or
+     * zooming out fixes that.
+     */
+    function lineMissHtml(query) {
+        const scoped = TransitApi.getCapabilities().lineSearchScope === 'map';
+        return `Keine Linie „${escapeHtml(query)}" ${scoped
+            ? 'in diesem Kartenausschnitt. Karte verschieben oder herauszoomen.'
+            : 'gefunden (fährt sie gerade?)'}`;
+    }
+
     async function searchMapLine(query) {
         if (!TransitApi.getCapabilities().lineSearch) return;
         dom.mapLineResults.innerHTML = '<div class="search-result-item">Suche&hellip;</div>';
         dom.mapLineResults.classList.remove('hidden');
 
         try {
-            const data = await TransitApi.searchTripsByLine(query, { results: 30 });
+            const data = await TransitApi.searchTripsByLine(query, {
+                results: 30,
+                // A map-scoped backend needs to know what is on screen; a
+                // network-wide one ignores both and searches everything.
+                bounds: TransitMap.getBounds(),
+                zoom: TransitMap.getZoom()
+            });
             const trips = Array.isArray(data.trips) ? data.trips : [];
 
             // One entry per direction, not per running vehicle: the point is
             // the line's route, and every run of a direction draws the same one.
             const seen = new Set();
-            const directions = [];
+            const entries = [];
             for (const trip of trips) {
                 const line = trip.line || {};
                 const direction = trip.direction || (trip.destination && trip.destination.name) || '';
                 const key = `${line.name}|${direction}`;
                 if (!line.name || seen.has(key)) continue;
                 seen.add(key);
-                directions.push({
+                entries.push({
                     id: trip.id,
                     name: line.name,
                     product: line.product || '',
@@ -2297,22 +2489,36 @@
                 });
             }
 
-            if (directions.length === 0) {
-                dom.mapLineResults.innerHTML = `<div class="search-result-item">Keine Linie „${escapeHtml(query)}" gefunden (fährt sie gerade?)</div>`;
+            if (entries.length === 0) {
+                dom.mapLineResults.innerHTML =
+                    `<div class="search-result-item">${lineMissHtml(query)}</div>`;
                 return;
             }
 
-            dom.mapLineResults.innerHTML = directions.map(entry => `
-                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
-                     data-label="${escapeHtml(`${entry.name} → ${entry.direction}`)}">
-                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
-                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
-                </div>
-            `).join('');
+            dom.mapLineResults.innerHTML = entries.map(lineResultHtml).join('');
         } catch (e) {
             console.error('Line search failed:', e);
             dom.mapLineResults.innerHTML = `<div class="search-result-item">Fehler: ${escapeHtml(e.message)}</div>`;
         }
+    }
+
+    /**
+     * One row of the line dropdown — one line, drawn end to end.
+     *
+     * Individual stop sequences used to be listed underneath, on the grounds
+     * that a branch or a short working is a real thing to look at. In practice
+     * a line has a dozen of them, they are all called the same, and telling
+     * them apart from a terminus name is impossible. So: one line, one row.
+     */
+    function lineResultHtml(entry) {
+        const label = `${entry.name} · ${entry.direction}`.trim();
+        return `
+                <div class="search-result-item" data-trip-id="${escapeHtml(entry.id)}"
+                     data-label="${escapeHtml(label)}">
+                    <span class="line-badge line-tint ${escapeHtml(entry.product)} ${escapeHtml(lineColorClass(entry.name))}">${escapeHtml(entry.name)}</span>
+                    <span class="line-result-direction">${escapeHtml(entry.direction || 'Richtung unbekannt')}</span>
+                </div>
+            `;
     }
 
     /** Shared with the board badges so a line keeps its colour everywhere. */

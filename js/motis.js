@@ -59,6 +59,52 @@ const MotisApi = (() => {
     let baseUrl = '';
 
     /**
+     * Assembled routes from the last line search, keyed by a synthetic ID.
+     *
+     * map/routes answers the search *and* carries the geometry, so drawing the
+     * line the user picked needs no second request — the shape is already here.
+     * Cleared on each new search; the only IDs the UI can hand back are the
+     * ones the current search just produced.
+     */
+    const routeCache = new Map();
+    const ROUTE_ID_PREFIX = 'motis-route:';
+
+    /**
+     * How far around the map centre a line search looks.
+     *
+     * The box only has to *find* the line — the full geometry comes from
+     * route-details afterwards, which is not box-limited. So it stays small: a
+     * few kilometres so a zoomed-in street view still finds the line one
+     * street over, at most ~20 x 20 km. The previous design fetched geometry
+     * from this same request and grew the box to ~55 x 60 km to compensate,
+     * which asked MOTIS for every route in a quarter of a Bundesland and is
+     * what made searches slow and prone to timeouts.
+     */
+    const SEARCH_MIN_SPAN_LAT = 0.05;
+    const SEARCH_MIN_SPAN_LON = 0.08;
+    const SEARCH_MAX_SPAN_LAT = 0.18;
+    const SEARCH_MAX_SPAN_LON = 0.30;
+    const SEARCH_MIN_ZOOM = 13;     // below this MOTIS drops trams and buses
+
+    /**
+     * How many of a line's stop patterns to fetch in full when it is drawn.
+     * Each is one route-details request, serialised by the rate limiter, so
+     * this bounds the click-to-drawn latency; the search response fills in
+     * whatever the skipped patterns would have added anyway.
+     */
+    const DETAIL_FETCH_MAX = 4;
+
+    /**
+     * Decimal places in a map/trips segment polyline. This is MOTIS's default
+     * and what the segment schema documents; see getRadar() for why the request
+     * does not ask for anything else.
+     */
+    const SEGMENT_PRECISION = 5;
+
+    /** A one-character query matches a lot; only the closest few are useful. */
+    const MAX_LINE_RESULTS = 8;
+
+    /**
      * @param {{fetchJson: function(string): Promise<Object>, baseUrl: string}} opt
      *        The fetcher is injected so rate limiting, retries and the outage
      *        diagnostics in api.js apply here too.
@@ -223,6 +269,452 @@ const MotisApi = (() => {
         const modes = on.flatMap(product => PRODUCT_TO_MODES[product] || []);
         // Everything off means everything off — not "no filter".
         return modes.length ? modes.join(',') : 'WALK';
+    }
+
+    // ===== Line lookup =====
+
+    const normalise = (name) => String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+
+    /**
+     * Clamp a viewport to the area a line search should cover.
+     *
+     * Too small and a line running one street over is invisible; too large and
+     * the response is every bus route in the state. Both bounds are applied
+     * around the centre of what the user is actually looking at.
+     */
+    function searchBox(bounds) {
+        const centreLat = (bounds.north + bounds.south) / 2;
+        const centreLon = (bounds.east + bounds.west) / 2;
+        const spanLat = Math.min(SEARCH_MAX_SPAN_LAT,
+            Math.max(SEARCH_MIN_SPAN_LAT, Math.abs(bounds.north - bounds.south)));
+        const spanLon = Math.min(SEARCH_MAX_SPAN_LON,
+            Math.max(SEARCH_MIN_SPAN_LON, Math.abs(bounds.east - bounds.west)));
+        return {
+            south: centreLat - spanLat / 2, north: centreLat + spanLat / 2,
+            west: centreLon - spanLon / 2, east: centreLon + spanLon / 2
+        };
+    }
+
+    /**
+     * Stitch a route's segments into one path.
+     *
+     * A polyline is shared between every route that runs over that stretch, so
+     * it is stored in one direction only and may be the wrong way round for
+     * this one. Each segment is oriented against the stop it starts from before
+     * being appended, otherwise the drawn line doubles back on itself.
+     */
+    function assembleRoute(info, polylines, stops) {
+        return assembleFromSegments(info.segments || [], polylines, stops);
+    }
+
+    /**
+     * Stitch an ordered list of segments into one path. See assembleRoute for
+     * why each segment has to be oriented before it is appended.
+     */
+    function assembleFromSegments(segments, polylines, stops) {
+        const points = [];
+        const routeStops = [];
+
+        for (const segment of segments) {
+            const shared = polylines[segment.polyline];
+            const from = stops[segment.from];
+            const to = stops[segment.to];
+            if (!shared || !shared.polyline) continue;
+
+            let leg = decodePolyline(shared.polyline.points, shared.polyline.precision || 5);
+            if (leg.length >= 2 && from && isFinite(from.lat)) {
+                const head = leg[0], tail = leg[leg.length - 1];
+                const near = (p) => Math.abs(p[0] - from.lat) + Math.abs(p[1] - from.lon);
+                if (near(tail) < near(head)) leg = leg.slice().reverse();
+            }
+
+            // The join between two segments is the same stop twice over.
+            if (points.length && leg.length && points[points.length - 1][0] === leg[0][0]
+                && points[points.length - 1][1] === leg[0][1]) leg = leg.slice(1);
+
+            points.push(...leg);
+            if (from) routeStops.push(from);
+            if (to) routeStops.push(to);
+        }
+
+        // Stops repeat at every segment join.
+        const seen = new Set();
+        const uniqueStops = [];
+        for (const stop of routeStops) {
+            const key = stop.stopId || `${stop.lat},${stop.lon}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniqueStops.push({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon });
+        }
+
+        return { points, stops: uniqueStops };
+    }
+
+    /**
+     * Every distinct stop-to-stop hop a set of routes runs over.
+     *
+     * MOTIS splits one line into several routes — one per distinct stop
+     * sequence, so short workings and each direction are separate entries.
+     * Drawing any single one of them draws part of the line, which is what
+     * made a search for M10 come back as a handful of stops. Pooling their
+     * segments first gives the line as a whole.
+     */
+    function collectEdges(infos, polylines) {
+        const edges = new Map();
+        for (const info of infos) {
+            for (const segment of info.segments || []) {
+                if (!polylines[segment.polyline]) continue;
+                // The same hop appears once per route running it, and once per
+                // direction with the endpoints swapped.
+                const key = [segment.from, segment.to].sort((a, b) => a - b).join('-');
+                if (!edges.has(key)) {
+                    edges.set(key, { from: segment.from, to: segment.to, polyline: segment.polyline });
+                }
+            }
+        }
+        return [...edges.values()];
+    }
+
+    /**
+     * How well a route's names answer what was typed.
+     *
+     * Exact beats prefix beats substring, so typing "5" still puts line 5 above
+     * RNV 5 and 105, while "rnv" finds every RNV line. The long name matches
+     * too but always ranks below the short one — it is a description, not a
+     * label, and matching it should never outrank the thing printed on the
+     * front of the vehicle.
+     *
+     * @returns {number} higher is better; -1 for no match
+     */
+    function matchScore(wanted, route) {
+        const short = normalise(route.shortName);
+        const long = normalise(route.longName);
+        if (short === wanted) return 4;
+        if (short.startsWith(wanted)) return 3;
+        if (short.includes(wanted)) return 2;
+        if (long.includes(wanted)) return 1;
+        return -1;
+    }
+
+    /**
+     * Split the pooled hops into as few continuous runs as possible.
+     *
+     * A line is not always one path. RNV 5 in Mannheim is a ring, and plenty of
+     * lines have a branch or a depot spur, so reducing the whole thing to its
+     * single longest walk drew a ring as a semicircle and a branch not at all.
+     * Every hop ends up in exactly one run here, so the drawn line is the whole
+     * line; the runs are as long as they can be so the map gets a handful of
+     * polylines rather than one per stop pair.
+     */
+    function chainEdges(edges) {
+        const unused = new Set(edges.keys());
+        const touching = new Map();
+        edges.forEach((edge, i) => {
+            for (const stop of [edge.from, edge.to]) {
+                if (!touching.has(stop)) touching.set(stop, []);
+                touching.get(stop).push(i);
+            }
+        });
+        const nextFrom = (stop) => (touching.get(stop) || []).find(i => unused.has(i));
+
+        const chains = [];
+        while (unused.size > 0) {
+            const seed = unused.values().next().value;
+            unused.delete(seed);
+            const chain = [edges[seed]];
+
+            // Grow forwards, then backwards, taking any hop that still needs a
+            // home and turning it to face the way we are walking.
+            for (let stop = chain[chain.length - 1].to; ;) {
+                const i = nextFrom(stop);
+                if (i === undefined) break;
+                unused.delete(i);
+                const edge = edges[i];
+                const step = edge.from === stop ? edge : { from: edge.to, to: edge.from, polyline: edge.polyline };
+                chain.push(step);
+                stop = step.to;
+            }
+            for (let stop = chain[0].from; ;) {
+                const i = nextFrom(stop);
+                if (i === undefined) break;
+                unused.delete(i);
+                const edge = edges[i];
+                const step = edge.to === stop ? edge : { from: edge.to, to: edge.from, polyline: edge.polyline };
+                chain.unshift(step);
+                stop = step.from;
+            }
+            chains.push(chain);
+        }
+        return chains;
+    }
+
+    /**
+     * The hops that make up the line proper, dropping anything not joined to it.
+     *
+     * Pooling by route id already keeps a different operator's identically
+     * named line out, but a route's own data can still carry a stray fragment —
+     * a depot spur recorded as its own pattern, a corridor left over from an
+     * old routing. Drawn, those appear as a piece of line floating somewhere
+     * the tram does not go. A line is one connected thing, so only the largest
+     * connected group of hops is kept.
+     */
+    function connectedCore(edges) {
+        if (edges.length === 0) return edges;
+
+        // Union-find over the stops the hops touch.
+        const parent = new Map();
+        const find = (x) => {
+            while (parent.get(x) !== x) {
+                parent.set(x, parent.get(parent.get(x)));
+                x = parent.get(x);
+            }
+            return x;
+        };
+        for (const edge of edges) {
+            for (const stop of [edge.from, edge.to]) if (!parent.has(stop)) parent.set(stop, stop);
+        }
+        for (const edge of edges) {
+            const a = find(edge.from), b = find(edge.to);
+            if (a !== b) parent.set(a, b);
+        }
+
+        const sizes = new Map();
+        for (const edge of edges) {
+            const root = find(edge.from);
+            sizes.set(root, (sizes.get(root) || 0) + 1);
+        }
+        let biggest = null, most = -1;
+        for (const [root, size] of sizes) if (size > most) { most = size; biggest = root; }
+
+        const core = edges.filter(edge => find(edge.from) === biggest);
+        if (core.length !== edges.length) {
+            console.info(`Line: ignored ${edges.length - core.length} hop(s) not connected to it.`);
+        }
+        return core;
+    }
+
+    /** Stops where the line ends rather than carries on. A ring has none. */
+    function terminiOf(edges) {
+        const degree = new Map();
+        for (const edge of edges) {
+            degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
+            degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
+        }
+        return [...degree.entries()].filter(([, n]) => n === 1).map(([stop]) => stop);
+    }
+
+    /**
+     * Find a line by name and return the whole line plus its variants.
+     *
+     * Unlike the transport.rest search this is geographic rather than
+     * network-wide — MOTIS has no search-by-name endpoint — so it covers the
+     * area around what is on screen. It reads the scheduled route rather than a
+     * running vehicle, which means a line that is not currently operating still
+     * draws.
+     *
+     * The first result is the line end to end; the ones after it are the
+     * individual routes MOTIS holds for it, which are worth keeping because a
+     * short working or a branch is a real thing to want to look at.
+     *
+     * @param {string} query
+     * @param {{bounds: Object, zoom: number, results: number}} opt
+     * @returns {Promise<{trips: Array}>} shaped like the transport.rest result
+     */
+    async function searchTripsByLine(query, opt = {}) {
+        const wanted = normalise(query);
+        if (!wanted || !opt.bounds) return { trips: [] };
+
+        const box = searchBox(opt.bounds);
+        const zoom = Math.max(SEARCH_MIN_ZOOM, Math.min(Math.round(opt.zoom || SEARCH_MIN_ZOOM), 16));
+
+        const params = new URLSearchParams({
+            zoom: String(zoom),
+            min: `${box.south},${box.west}`,
+            max: `${box.north},${box.east}`,
+            language: 'de'
+        });
+
+        const data = await call('/api/experimental/map/routes', params);
+        const infos = Array.isArray(data && data.routes) ? data.routes : [];
+        const polylines = Array.isArray(data && data.polylines) ? data.polylines : [];
+        const stops = Array.isArray(data && data.stops) ? data.stops : [];
+
+        routeCache.clear();
+
+        // Group the matching routes by the line they belong to: a search for
+        // "M10" should produce one M10, not one per stop sequence. Grouped by
+        // the route's own id rather than the printed name — two operators can
+        // both run something called M10, and pooling their segments would draw
+        // one line's arms onto the other.
+        const lines = new Map();
+        for (const info of infos) {
+            let best = -1;
+            let bestRoute = null;
+            for (const route of info.transitRoutes || []) {
+                const score = matchScore(wanted, route);
+                if (score > best) { best = score; bestRoute = route; }
+            }
+            if (best < 0) continue;
+
+            const key = bestRoute.id || bestRoute.shortName || bestRoute.longName || query;
+            if (!lines.has(key)) {
+                lines.set(key, {
+                    key,
+                    name: bestRoute.shortName || bestRoute.longName || query,
+                    match: bestRoute, score: best, infos: []
+                });
+            }
+            const line = lines.get(key);
+            line.infos.push(info);
+            if (best > line.score) { line.score = best; line.match = bestRoute; }
+        }
+
+        // Closest answer first, and a cap so a one-character query does not
+        // return every line in the region.
+        const ranked = [...lines.values()]
+            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'de', { numeric: true }))
+            .slice(0, MAX_LINE_RESULTS);
+
+        const trips = [];
+        for (const line of ranked) {
+            const product = productOf(line.infos[0].mode);
+            const mode = line.infos[0].mode || '';
+
+            // The label comes from the long name — in GTFS usually the two
+            // termini ("Warschauer Str. <> Hauptbahnhof"). Assembling the real
+            // termini here would need the geometry this request deliberately no
+            // longer carries in full.
+            const direction = line.match.longName || '';
+
+            const id = `${ROUTE_ID_PREFIX}line:${line.key}`;
+            routeCache.set(id, {
+                id, name: line.name, direction, product, mode,
+                // Everything needed to draw the whole line later: which
+                // patterns to fetch in full, and the partial data this search
+                // already returned as a fallback and a supplement.
+                routeIdxs: [...new Set(line.infos.map(info => info.routeIdx).filter(Number.isFinite))],
+                searchData: { routes: line.infos, polylines, stops }
+            });
+            trips.push({ id, line: { name: line.name, product }, direction, kind: 'line' });
+        }
+
+        return { trips };
+    }
+
+    /** Full data for one stop pattern, by the index map/routes handed out. */
+    function fetchRouteDetails(routeIdx) {
+        const params = new URLSearchParams({ routeIdx: String(routeIdx), language: 'de' });
+        return call('/api/experimental/map/route-details', params);
+    }
+
+    /**
+     * Concatenate several {routes, polylines, stops} payloads into one, with
+     * every segment's indices remapped into the combined arrays.
+     */
+    function mergeRouteData(payloads) {
+        const stops = [];
+        const polylines = [];
+        const infos = [];
+
+        // The same physical stop appears in several payloads at different
+        // array positions. Indices are the graph's node identity, so they have
+        // to be unified — otherwise Alexanderplatz-from-payload-one and
+        // Alexanderplatz-from-payload-two are two unconnected nodes, the
+        // line's graph falls apart at every payload boundary, and the
+        // largest-connected-component filter throws most of the line away.
+        const canonical = new Map();
+        const stopIndex = (stop) => {
+            if (!stop) return -1;
+            const key = stop.stopId
+                || `${(+stop.lat).toFixed(5)},${(+stop.lon).toFixed(5)}`;
+            if (!canonical.has(key)) {
+                canonical.set(key, stops.length);
+                stops.push(stop);
+            }
+            return canonical.get(key);
+        };
+
+        for (const data of payloads) {
+            if (!data) continue;
+            const localStops = Array.isArray(data.stops) ? data.stops : [];
+            const polyBase = polylines.length;
+            polylines.push(...(Array.isArray(data.polylines) ? data.polylines : []));
+            for (const info of (Array.isArray(data.routes) ? data.routes : [])) {
+                infos.push({
+                    ...info,
+                    segments: (info.segments || []).map(segment => ({
+                        from: stopIndex(localStops[segment.from]),
+                        to: stopIndex(localStops[segment.to]),
+                        polyline: segment.polyline + polyBase
+                    })).filter(segment => segment.from >= 0 && segment.to >= 0)
+                });
+            }
+        }
+        return { infos, polylines, stops };
+    }
+
+    /**
+     * Pool a line's patterns into the drawn line: deduplicated hops, only the
+     * connected core, chained into as few runs as possible.
+     */
+    function assembleWholeLine(infos, polylines, stops) {
+        const edges = connectedCore(collectEdges(infos, polylines));
+        const chains = chainEdges(edges);
+
+        const shapes = [];
+        for (const chain of chains) {
+            const run = assembleFromSegments(chain, polylines, stops);
+            if (run.points.length < 2) continue;
+            shapes.push(toFeatureCollection(run.points, run.stops));
+        }
+
+        const termini = terminiOf(edges)
+            .map(i => stops[i])
+            .filter(Boolean)
+            .map(stop => ({ id: stop.stopId || '', name: stop.name || '', lat: stop.lat, lon: stop.lon }));
+
+        return { shapes, termini };
+    }
+
+    /**
+     * Draw data for a line picked from the search.
+     *
+     * The full geometry is fetched per stop pattern from route-details, which
+     * is not limited to any bounding box — this is what lets a line run past
+     * the edge of wherever the search happened to look. The search response's
+     * own partial data is merged in as well, so a pattern beyond
+     * DETAIL_FETCH_MAX, or a route-details endpoint that fails, degrades to
+     * what the search already knew instead of to nothing.
+     */
+    async function lineTrip(cached) {
+        if (!cached.assembled) {
+            const idxs = cached.routeIdxs.slice(0, DETAIL_FETCH_MAX);
+            if (cached.routeIdxs.length > idxs.length) {
+                console.info(`Line ${cached.name}: fetching ${idxs.length} of ${cached.routeIdxs.length} patterns in full.`);
+            }
+            const details = await Promise.allSettled(idxs.map(fetchRouteDetails));
+            const payloads = details
+                .filter(result => result.status === 'fulfilled')
+                .map(result => result.value);
+            if (payloads.length < idxs.length) {
+                console.warn(`Line ${cached.name}: ${idxs.length - payloads.length} route-details request(s) failed; drawing from search data.`);
+            }
+
+            const merged = mergeRouteData([...payloads, cached.searchData]);
+            const { shapes, termini } = assembleWholeLine(merged.infos, merged.polylines, merged.stops);
+            cached.assembled = { shapes, termini };
+        }
+
+        const { shapes, termini } = cached.assembled;
+        if (shapes.length === 0) return { trip: {} };
+        return { trip: {
+            id: cached.id,
+            line: { name: cached.name, product: cached.product, mode: cached.mode },
+            direction: cached.direction,
+            polyline: shapes[0],
+            polylines: shapes,
+            termini
+        } };
     }
 
     // ===== Endpoints =====
@@ -408,6 +900,13 @@ const MotisApi = (() => {
      * and the stop list both come out of that leg.
      */
     async function getTrip(tripId) {
+        // A line picked from the search: the search found it, this fetches it
+        // in full. Assembled once, then answered from memory on a re-click.
+        if (String(tripId).startsWith(ROUTE_ID_PREFIX)) {
+            const cached = routeCache.get(String(tripId));
+            return cached ? lineTrip(cached) : { trip: {} };
+        }
+
         const params = new URLSearchParams({
             tripId: String(tripId),
             detailedLegs: 'true',
@@ -460,7 +959,15 @@ const MotisApi = (() => {
             max: `${bbox.north},${bbox.east}`,
             startTime: now.toISOString(),
             endTime: new Date(now.getTime() + 30000).toISOString(),
-            precision: String(zoom >= 11 ? 5 : zoom >= 8 ? 4 : zoom >= 5 ? 3 : 2),
+            // `precision` is deliberately not sent. It sets how many decimal
+            // places the returned polylines are encoded with, and the response
+            // does not say which was used — so asking for fewer places to save
+            // bandwidth (as the spec suggests doing when zoomed out) means
+            // decoding against a number the client only assumes. Getting that
+            // wrong divides every coordinate by a power of ten and puts the
+            // whole fleet in the Gulf of Guinea. The default is 5, documented
+            // on the segment itself, so leaving it alone is the one setting
+            // that cannot disagree with the decoder.
             language: 'de'
         });
 
@@ -468,16 +975,30 @@ const MotisApi = (() => {
         const segments = Array.isArray(data) ? data : [];
         const at = now.getTime();
 
+        // Nothing outside the box was asked for, so anything outside it is a
+        // decode gone wrong rather than a vehicle. Generous, because an
+        // interpolated position sits between two stops and the far one can lie
+        // beyond the edge.
+        const margin = {
+            lat: Math.abs(bbox.north - bbox.south) || 1,
+            lon: Math.abs(bbox.east - bbox.west) || 1
+        };
+        const plausible = ([lat, lon]) =>
+            lat <= bbox.north + margin.lat && lat >= bbox.south - margin.lat
+            && lon <= bbox.east + margin.lon && lon >= bbox.west - margin.lon;
+
         const movements = [];
         const seen = new Set();
+        let implausible = 0;
         for (const segment of segments) {
             const from = Date.parse(segment.departure);
             const to = Date.parse(segment.arrival);
             if (!isFinite(from) || !isFinite(to) || at < from || at > to) continue;
 
-            const points = decodePolyline(segment.polyline, 5);
+            const points = decodePolyline(segment.polyline, SEGMENT_PRECISION);
             const position = pointAlong(points, to > from ? (at - from) / (to - from) : 0);
             if (!position) continue;
+            if (!plausible(position)) { implausible++; continue; }
 
             const trip = (segment.trips || [])[0] || {};
             const tripId = trip.tripId || '';
@@ -501,6 +1022,9 @@ const MotisApi = (() => {
             if (opt.results && movements.length >= opt.results) break;
         }
 
+        if (implausible > 0) {
+            console.warn(`Discarded ${implausible} vehicle position(s) outside the requested area.`);
+        }
         return { movements };
     }
 
@@ -545,6 +1069,7 @@ const MotisApi = (() => {
         isMotisId,
         decodePolyline,
         searchPlaces,
+        searchTripsByLine,
         getDepartures,
         getStation,
         getJourneys,
